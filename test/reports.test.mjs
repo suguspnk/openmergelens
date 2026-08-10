@@ -97,6 +97,48 @@ test('report entries contain only PR outcomes and order attention first', () => 
   );
 });
 
+test('report entries retain queue deferrals alongside pull request outcomes', () => {
+  const entries = reportEntries({
+    outcomes: [
+      result('reviewed').outcomes[0],
+      {
+        status: 'deferred',
+        subject: 'review queue',
+        note: '1 candidate(s) deferred by metadata budget',
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    entries.map(({ kind, status, repo, number, title, note }) => ({
+      kind,
+      status,
+      repo,
+      number,
+      title,
+      note,
+    })),
+    [
+      {
+        kind: 'summary',
+        status: 'deferred',
+        repo: null,
+        number: null,
+        title: 'review queue',
+        note: '1 candidate(s) deferred by metadata budget',
+      },
+      {
+        kind: 'pull-request',
+        status: 'reviewed',
+        repo: 'owner/repo',
+        number: 42,
+        title: 'Improve report notifications',
+        note: '',
+      },
+    ],
+  );
+});
+
 test('report entries group by account, then repository, without changing entry order', () => {
   const entries = reportEntries({
     outcomes: [
@@ -335,6 +377,57 @@ test('creating a report writes private paired files and lists it newest first', 
       0o600,
     );
   }
+});
+
+test('mixed reports retain queue deferrals without weakening PR URL handling', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-reports-'));
+  t.after(() => import('node:fs/promises').then(({ rm }) =>
+    rm(directory, { recursive: true, force: true })));
+
+  const created = await createPollReport({
+    outcomes: [
+      result().outcomes[0],
+      {
+        status: 'deferred',
+        subject: 'review queue',
+        note: '1 candidate(s) deferred by metadata budget',
+      },
+    ],
+  }, {
+    reportsDirectory: directory,
+    createId: () => FIRST_ID,
+  });
+  const html = await readFile(created.path, 'utf8');
+
+  assert.equal(created.firstPullRequest, 'owner/repo#42');
+  assert.equal(created.total, 2);
+  assert.match(html, /review queue/);
+  assert.match(html, /1 candidate\(s\) deferred by metadata budget/);
+  assert.match(html, /href="https:\/\/github\.com\/owner\/repo\/pull\/42"/);
+});
+
+test('deferral-only polls create a retained report with the queue note', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-reports-'));
+  t.after(() => import('node:fs/promises').then(({ rm }) =>
+    rm(directory, { recursive: true, force: true })));
+
+  const created = await createPollReport({
+    outcomes: [{
+      status: 'deferred',
+      subject: 'review queue',
+      note: '1 candidate(s) deferred by metadata budget',
+    }],
+  }, {
+    reportsDirectory: directory,
+    createId: () => SECOND_ID,
+  });
+  const html = await readFile(created.path, 'utf8');
+
+  assert.equal(created.firstPullRequest, 'review queue');
+  assert.equal(created.total, 1);
+  assert.match(html, /Poll summary/);
+  assert.match(html, /review queue/);
+  assert.match(html, /1 candidate\(s\) deferred by metadata budget/);
 });
 
 test('report creation ignores generic failures with no pull request identity', async (t) => {

@@ -4,6 +4,7 @@ import {
   CLAUDE_REVIEWER_COMMAND,
   CODEX_REVIEWER_COMMAND,
 } from '../lib/reviewer-command-defaults.mjs';
+import { DEFAULT_REVIEW_TIMEOUT_MS } from '../lib/reviewer-adapter.mjs';
 import {
   calculateLiveReviewWatchdogMs,
   DEFAULT_LIVE_REVIEW_MODE,
@@ -37,6 +38,7 @@ test('live review E2E defaults to provisioning and posting', () => {
   assert.equal(config.mode, 'post');
   assert.equal(config.provision, DEFAULT_LIVE_REVIEW_PROVISION);
   assert.equal(config.number, undefined);
+  assert.equal(config.reviewTimeoutMs, DEFAULT_REVIEW_TIMEOUT_MS);
 });
 
 test('live E2E config selects the generated Claude reviewer command', () => {
