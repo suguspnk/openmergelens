@@ -875,8 +875,8 @@ test('review focus count defaults to all categories and validates bounds', () =>
   assert.throws(() => resolveReviewFocusCount(5), /from 1 to 4/);
 });
 
-test('review timeout defaults to twelve minutes and validates manual bounds', () => {
-  assert.equal(DEFAULT_REVIEW_TIMEOUT_MS, 12 * 60 * 1000);
+test('review timeout defaults to thirty minutes and validates manual bounds', () => {
+  assert.equal(DEFAULT_REVIEW_TIMEOUT_MS, 30 * 60 * 1000);
   assert.equal(resolveReviewTimeoutMs(undefined), DEFAULT_REVIEW_TIMEOUT_MS);
   assert.equal(resolveReviewTimeoutMs(15 * 60 * 1000), 15 * 60 * 1000);
   assert.equal(isValidReviewTimeoutMs(MIN_REVIEW_TIMEOUT_MS), true);

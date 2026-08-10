@@ -3,7 +3,10 @@ import {
   CODEX_REVIEWER_COMMAND,
   validateReviewerCommandContract,
 } from '../lib/reviewer-command-defaults.mjs';
-import { REVIEW_INSPECTION_RETRY_COUNT } from '../lib/reviewer-adapter.mjs';
+import {
+  DEFAULT_REVIEW_TIMEOUT_MS,
+  REVIEW_INSPECTION_RETRY_COUNT,
+} from '../lib/reviewer-adapter.mjs';
 
 export const REVIEWER_BACKENDS = Object.freeze(['claude', 'codex']);
 export const DEFAULT_LIVE_REVIEW_MODE = 'post';
@@ -184,7 +187,7 @@ export function parseEnvironment(environment = process.env) {
         'OPENMERGELENS_E2E_REVIEW_TIMEOUT_MS',
         60_000,
         3_600_000,
-        720_000,
+        DEFAULT_REVIEW_TIMEOUT_MS,
       ),
       keepHome: parseBooleanFlag(
         environment.OPENMERGELENS_E2E_KEEP_HOME,

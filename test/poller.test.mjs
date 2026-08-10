@@ -1555,7 +1555,7 @@ test('no-op requested candidates do not starve a later changed candidate at the 
   assert.ok(metadataNumbers.includes(MAX_REVIEWS_PER_POLL + 1));
 });
 
-test('candidate metadata budget preserves later work and reports overflow', async (t) => {
+test('candidate metadata budget preserves later work and defers overflow', async (t) => {
   const files = await fixture(t);
   const account = { ...work, repositories: ['owner/repo'] };
   const state = {};
@@ -1602,7 +1602,7 @@ test('candidate metadata budget preserves later work and reports overflow', asyn
     dependencies,
   });
 
-  assert.equal(result.failed, true);
+  assert.equal(result.failed, false);
   assert.equal(result.reviewed, MAX_CANDIDATE_METADATA_PER_POLL - MAX_REVIEWS_PER_POLL);
   assert.deepEqual(reviewedNumbers, [
     ...Array.from(
@@ -1616,8 +1616,13 @@ test('candidate metadata budget preserves later work and reports overflow', asyn
     metadataNumbers.length,
     MAX_CANDIDATE_METADATA_PER_POLL + reviewedNumbers.length * 2,
   );
+  assert.equal(result.failures.length, 0);
+  assert.equal(
+    result.outcomes.find(({ subject }) => subject === 'review queue')?.status,
+    'deferred',
+  );
   assert.match(
-    result.failures.find(({ subject }) => subject === 'review queue')?.note ?? '',
+    result.outcomes.find(({ subject }) => subject === 'review queue')?.note ?? '',
     /1 candidate\(s\) deferred by metadata budget/,
   );
 });
@@ -1667,7 +1672,7 @@ test('candidate metadata overflow rotates its window so later PRs do not starve'
     ...files,
     dependencies,
   });
-  assert.equal(first.failed, true);
+  assert.equal(first.failed, false);
   assert.equal(first.reviewed, 0);
   assert.deepEqual(
     metadataNumbers,
@@ -1679,7 +1684,7 @@ test('candidate metadata overflow rotates its window so later PRs do not starve'
     ...files,
     dependencies,
   });
-  assert.equal(second.failed, true);
+  assert.equal(second.failed, false);
   assert.equal(second.reviewed, 1);
   assert.equal(metadataNumbers[MAX_CANDIDATE_METADATA_PER_POLL], MAX_CANDIDATE_METADATA_PER_POLL + 1);
   assert.deepEqual(reviewedNumbers, [MAX_CANDIDATE_METADATA_PER_POLL + 1]);
