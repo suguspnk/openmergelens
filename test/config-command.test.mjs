@@ -29,7 +29,7 @@ function createConfig() {
     reviewerInputMode: 'stdin',
     reviewBatchSize: 5,
     reviewFocusCount: 4,
-    reviewTimeoutMs: 720000,
+    reviewTimeoutMs: 1800000,
     desktopNotifications: true,
     stateFile: './state.json',
   });
@@ -46,10 +46,10 @@ test('config menus expose every mutable area and current values', () => {
   assert.match(options.find(({ value }) => value === 'accounts').hint, /1 account/);
   assert.match(options.find(({ value }) => value === 'reviewer').hint, /Claude Code/);
   assert.match(options.find(({ value }) => value === 'review').hint, /batch 5/);
-  assert.match(options.find(({ value }) => value === 'review').hint, /timeout 720000ms/);
+  assert.match(options.find(({ value }) => value === 'review').hint, /timeout 1800000ms/);
   assert.equal(
     reviewBehaviorMenuOptions(config).find(({ value }) => value === 'timeout').hint,
-    '720000 ms',
+    '1800000 ms',
   );
   assert.equal(
     reviewBehaviorMenuOptions(config).find(({ value }) => value === 'state-file').hint,

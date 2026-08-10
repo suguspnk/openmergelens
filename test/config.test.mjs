@@ -88,7 +88,7 @@ test('rejects reviewer timeouts outside the bounded manual range', () => {
     MAX_REVIEW_TIMEOUT_MS + 1,
     12.5 * 60 * 1000 + 0.5,
     null,
-    '720000',
+    '1800000',
   ]) {
     assert.throws(
       () => validateConfig({ ...validConfig, reviewTimeoutMs }),

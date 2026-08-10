@@ -375,7 +375,7 @@ read-only restrictions. Keep custom commands swappable by retaining both
   "reviewerInputMode": "stdin",
   "reviewBatchSize": 5,
   "reviewFocusCount": 4,
-  "reviewTimeoutMs": 720000,
+  "reviewTimeoutMs": 1800000,
   "desktopNotifications": true,
   "stateFile": "./state.json"
 }
