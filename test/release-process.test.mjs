@@ -14,11 +14,12 @@ async function readProjectFile(relativePath) {
   return contents.replaceAll('\r\n', '\n');
 }
 
-test('release metadata is finalized as 1.5.0', async () => {
+test('release metadata is finalized as 1.5.1', async () => {
   const packageJson = JSON.parse(await readProjectFile('package.json'));
   const changelog = await readProjectFile('CHANGELOG.md');
 
-  assert.equal(packageJson.version, '1.5.0');
+  assert.equal(packageJson.version, '1.5.1');
+  assert.match(changelog, /^## \[1\.5\.1] - \d{4}-\d{2}-\d{2}$/m);
   assert.match(changelog, /^## \[1\.5\.0] - \d{4}-\d{2}-\d{2}$/m);
   assert.match(changelog, /^## \[1\.4\.0] - \d{4}-\d{2}-\d{2}$/m);
   assert.match(changelog, /^## \[1\.3\.0] - \d{4}-\d{2}-\d{2}$/m);

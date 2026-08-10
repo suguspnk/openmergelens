@@ -4,6 +4,13 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-08-10
+
+- Increased the default reviewer process timeout to 30 minutes and aligned
+  the live-review configuration with that default.
+- Reported review-queue metadata budget deferrals as deferred outcomes and
+  retained them in poll reports for accurate queue status.
+
 ## [1.5.0] - 2026-08-07
 
 - Added `openmergelens config`, an interactive editor for accounts,
