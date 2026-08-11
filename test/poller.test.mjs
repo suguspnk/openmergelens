@@ -46,6 +46,11 @@ function config(accounts = [work, personal]) {
   };
 }
 
+function completeSearch(candidates) {
+  Object.defineProperty(candidates, 'complete', { value: true });
+  return candidates;
+}
+
 async function fixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-poller-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -74,7 +79,7 @@ function successfulDependencies(events) {
     currentUsername: async ({ auth }) => auth.username,
     searchReviewRequestedPRs: async ({ username, repo }) => {
       events.push(`search:${username}:${repo}`);
-      return [{ repo, number: 7 }];
+      return completeSearch([{ repo, number: 7 }]);
     },
     getPullRequest: async () => ({
       headRefOid: 'sha-1',
@@ -122,10 +127,10 @@ function admissionStressDependencies(failureStage, stats) {
     resolveGitHubAuth: async (account) => ({ ...account, token: 'token' }),
     currentUsername: async ({ auth }) => auth.username,
     searchReviewRequestedPRs: async ({ repo }) =>
-      Array.from({ length: candidateCount }, (_, index) => ({
+      completeSearch(Array.from({ length: candidateCount }, (_, index) => ({
         repo,
         number: index + 1,
-      })),
+      }))),
     getPullRequest: async ({ repo, number }) => ({
       headRefOid: `sha-${number}`,
       number,
@@ -250,10 +255,10 @@ for (const [label, malformedMetadata] of [
 
     const events = [];
     const dependencies = successfulDependencies(events);
-    dependencies.searchReviewRequestedPRs = async () => [
+    dependencies.searchReviewRequestedPRs = async () => completeSearch([
       { repo: 'owner/repo', number: 1 },
       { repo: 'owner/repo', number: 2 },
-    ];
+    ]);
     dependencies.getPullRequest = async ({ number }) => {
       if (number === 1) return malformedMetadata;
       return {
@@ -467,10 +472,10 @@ test('initial reconciliation rate limits back off the next PR before it can post
   });
   const dependencies = successfulDependencies(events);
   dependencies.createGitHubMutationQueue = () => queue;
-  dependencies.searchReviewRequestedPRs = async () => [
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([
     { repo: 'owner/repo', number: 1 },
     { repo: 'owner/repo', number: 2 },
-  ];
+  ]);
   dependencies.getPullRequest = async ({ number }) => ({
     headRefOid: `sha-${number}`,
     number,
@@ -555,10 +560,10 @@ test('rate-limited ordinary reads delay the next candidate ordinary read', async
   });
   const dependencies = successfulDependencies([]);
   dependencies.createGitHubMutationQueue = () => queue;
-  dependencies.searchReviewRequestedPRs = async () => [
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([
     { repo: 'owner/repo', number: 1 },
     { repo: 'owner/repo', number: 2 },
-  ];
+  ]);
   dependencies.getPullRequest = async ({ number }) => {
     if (number === 1) {
       throw Object.assign(new Error('HTTP 429: Too Many Requests'), {
@@ -635,7 +640,7 @@ test('account schedulers isolate rate-limit backoff without admitting tracked st
         retryAfterMs: 5_000,
       });
     }
-    return [];
+    return completeSearch([]);
   };
   dependencies.getPullRequest = async ({ auth, number }) => {
     events.push(`metadata:${auth.username}@${auth.hostname}#${number}:${clock}`);
@@ -712,7 +717,7 @@ test('healthy account discovery starts before another account read backoff expir
         retryAfterMs: 5_000,
       });
     }
-    return [];
+    return completeSearch([]);
   };
 
   const result = await pollOnce({
@@ -807,7 +812,7 @@ test('account six starts before a slow two-repository account backoff expires', 
       });
     }
     if (username !== 'account-1') await fastSearches;
-    return [];
+    return completeSearch([]);
   };
 
   const result = await pollOnce({
@@ -963,7 +968,7 @@ test('tracked state does not admit metadata or a new-head review without a fresh
   });
 
   const dependencies = successfulDependencies(events);
-  dependencies.searchReviewRequestedPRs = async () => [];
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([]);
   let metadataCalls = 0;
   dependencies.getPullRequest = async () => {
     metadataCalls += 1;
@@ -1026,6 +1031,96 @@ test('a failed requested-review search retains tracked state without admitting i
     'sha-A',
   );
 });
+
+test('a search without completeness proof cannot admit work or clean state', async (t) => {
+  const files = await fixture(t);
+  const account = { ...work, repositories: ['owner/repo'] };
+  const initialState = {
+    [prKey('owner/repo', 7, account)]: {
+      lastReviewedSha: 'sha-old-7',
+      lastReviewedAt: '2026-08-05T00:00:00.000Z',
+    },
+    [prKey('owner/repo', 8, account)]: {
+      lastReviewedSha: 'sha-old-8',
+      lastReviewedAt: '2026-08-05T00:00:00.000Z',
+    },
+  };
+  await saveState(files.stateFile, initialState);
+
+  const dependencies = successfulDependencies([]);
+  // Simulate plausible partial rows without a completeness proof.
+  dependencies.searchReviewRequestedPRs = async () => [
+    { repo: 'owner/repo', number: 7 },
+  ];
+  let metadataCalls = 0;
+  dependencies.getPullRequest = async () => {
+    metadataCalls += 1;
+    throw new Error('unproven discovery must not reach metadata');
+  };
+
+  const result = await pollOnce({
+    config: config([account]),
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, true);
+  assert.equal(result.reviewed, 0);
+  assert.deepEqual(result.outcomes, []);
+  assert.deepEqual(result.failures.map(({ subject, note }) => ({ subject, note })), [
+    { subject: 'owner/repo', note: 'search completeness unproven' },
+  ]);
+  assert.equal(metadataCalls, 0);
+  assert.deepEqual(JSON.parse(await readFile(files.stateFile, 'utf8')), initialState);
+});
+
+for (const [label, diagnostic] of [
+  ['changing total_count', 'inconsistent pagination metadata'],
+  ['missing pagination metadata', 'incomplete pagination metadata'],
+  ['duplicate candidates', 'duplicate pull request candidate'],
+  ['mismatched candidate count', 'candidate count did not match result metadata'],
+]) {
+  test(`untrustworthy ${label} discovery retains state without review`, async (t) => {
+    const files = await fixture(t);
+    const account = { ...work, repositories: ['owner/repo'] };
+    const initialState = {
+      [prKey('owner/repo', 7, account)]: {
+        lastReviewedSha: 'sha-old-7',
+        lastReviewedAt: '2026-08-05T00:00:00.000Z',
+      },
+      [prKey('owner/repo', 8, account)]: {
+        lastReviewedSha: 'sha-old-8',
+        lastReviewedAt: '2026-08-05T00:00:00.000Z',
+      },
+    };
+    await saveState(files.stateFile, initialState);
+
+    const dependencies = successfulDependencies([]);
+    dependencies.searchReviewRequestedPRs = async () => {
+      throw new Error(`GitHub search returned ${diagnostic}`);
+    };
+    let metadataCalls = 0;
+    dependencies.getPullRequest = async () => {
+      metadataCalls += 1;
+      throw new Error('untrustworthy discovery must not reach metadata');
+    };
+
+    const result = await pollOnce({
+      config: config([account]),
+      ...files,
+      dependencies,
+    });
+
+    assert.equal(result.failed, true);
+    assert.equal(result.reviewed, 0);
+    assert.deepEqual(result.outcomes, []);
+    assert.deepEqual(result.failures.map(({ subject, note }) => ({ subject, note })), [
+      { subject: 'owner/repo', note: 'search failed' },
+    ]);
+    assert.equal(metadataCalls, 0);
+    assert.deepEqual(JSON.parse(await readFile(files.stateFile, 'utf8')), initialState);
+  });
+}
 
 test('a search failure preserves all state scopes without metadata reads', async (t) => {
   const files = await fixture(t);
@@ -1103,9 +1198,9 @@ test('a foreign requested repository is rejected before metadata, review, or pos
     },
   });
   const dependencies = successfulDependencies([]);
-  dependencies.searchReviewRequestedPRs = async () => [
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([
     { repo: 'other/secret', number: 7 },
-  ];
+  ]);
   dependencies.getPullRequest = async () => {
     calls.push('metadata');
     return {
@@ -1145,13 +1240,13 @@ test('foreign requested repositories do not consume the review safety cap', asyn
   const metadataRepos = [];
   const account = { ...work, repositories: ['owner/repo'] };
   const dependencies = successfulDependencies([]);
-  dependencies.searchReviewRequestedPRs = async () => [
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([
     { repo: 'other/secret', number: 7 },
     ...Array.from({ length: MAX_REVIEWS_PER_POLL }, (_, index) => ({
       repo: 'owner/repo',
       number: index + 1,
     })),
-  ];
+  ]);
   dependencies.getPullRequest = async ({ repo, number }) => {
     metadataRepos.push(`${repo}#${number}`);
     return {
@@ -1189,11 +1284,11 @@ test('malformed requested candidates are rejected while valid candidates are pre
     },
   });
   const dependencies = successfulDependencies([]);
-  dependencies.searchReviewRequestedPRs = async () => [
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([
     null,
     { repo: 'owner/repo', number: 0 },
     { repo: 'owner/repo', number: 7 },
-  ];
+  ]);
   dependencies.getPullRequest = async ({ number }) => {
     metadataNumbers.push(number);
     return {
@@ -1237,7 +1332,7 @@ test('a dry run does not prune tracked state after a trustworthy empty search', 
   });
 
   const dependencies = successfulDependencies(events);
-  dependencies.searchReviewRequestedPRs = async () => [];
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([]);
   dependencies.getPullRequest = async () => ({
     headRefOid: 'sha-B',
     number: 7,
@@ -1283,7 +1378,9 @@ test('mixed-case existing state is recognized without reconciling or duplicating
 
   const dependencies = successfulDependencies([]);
   let reconciliationCalls = 0;
-  dependencies.searchReviewRequestedPRs = async () => [{ repo: 'owner/repo', number: 7 }];
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([
+    { repo: 'owner/repo', number: 7 },
+  ]);
   dependencies.reviewAlreadyPosted = async () => {
     reconciliationCalls += 1;
     return true;
@@ -1324,7 +1421,7 @@ test('mixed-case scoped state is pruned without metadata when requested search i
 
   const events = [];
   const dependencies = successfulDependencies(events);
-  dependencies.searchReviewRequestedPRs = async () => [];
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([]);
   dependencies.getPullRequest = async () => ({
     headRefOid: 'new-sha',
     number: 7,
@@ -1361,10 +1458,10 @@ test('a requested PR that closes after search is retired without review', async 
   );
 
   const dependencies = successfulDependencies([]);
-  dependencies.searchReviewRequestedPRs = async () => [{
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([{
     repo: 'owner/repo',
     number: 7,
-  }];
+  }]);
   dependencies.getPullRequest = async () => ({
     headRefOid: 'new-sha',
     number: 7,
@@ -1411,7 +1508,7 @@ test('trusted cleanup is isolated to the searched account and repository', async
   });
 
   const dependencies = successfulDependencies(events);
-  dependencies.searchReviewRequestedPRs = async () => [];
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([]);
   dependencies.getPullRequest = async ({ number }) => {
     metadataNumbers.push(number);
     return {
@@ -1462,8 +1559,9 @@ test('stale tracked backlog is cleaned without consuming requested candidate met
   await saveState(files.stateFile, trackedState);
 
   const dependencies = successfulDependencies([]);
-  dependencies.searchReviewRequestedPRs = async ({ repo }) =>
-    repo === 'owner/new' ? [{ repo, number: 99 }] : [];
+  dependencies.searchReviewRequestedPRs = async ({ repo }) => completeSearch(
+    repo === 'owner/new' ? [{ repo, number: 99 }] : [],
+  );
   dependencies.getPullRequest = async ({ repo, number }) => {
     metadataCandidates.push(`${repo}#${number}`);
     return {
@@ -1503,13 +1601,14 @@ test('a changed candidate in another repository receives safety-cap capacity', a
   };
   const reviewedCandidates = [];
   const dependencies = successfulDependencies([]);
-  dependencies.searchReviewRequestedPRs = async ({ repo }) =>
+  dependencies.searchReviewRequestedPRs = async ({ repo }) => completeSearch(
     repo === 'owner/busy'
       ? Array.from({ length: MAX_REVIEWS_PER_POLL }, (_, index) => ({
         repo,
         number: index + 1,
       }))
-      : [{ repo, number: 99 }];
+      : [{ repo, number: 99 }],
+  );
   dependencies.postReview = async ({ repo, number }) => {
     reviewedCandidates.push(`${repo}#${number}`);
   };
@@ -1554,10 +1653,10 @@ test('no-op requested candidates do not starve a later changed candidate at the 
   const reviewedNumbers = [];
   const dependencies = successfulDependencies([]);
   dependencies.searchReviewRequestedPRs = async ({ repo }) =>
-    Array.from({ length: MAX_REVIEWS_PER_POLL + 1 }, (_, index) => ({
+    completeSearch(Array.from({ length: MAX_REVIEWS_PER_POLL + 1 }, (_, index) => ({
       repo,
       number: index + 1,
-    }));
+    })));
   dependencies.getPullRequest = async ({ repo, number }) => {
     metadataNumbers.push(number);
     return {
@@ -1607,10 +1706,10 @@ test('candidate metadata budget preserves later work and defers overflow', async
   const reviewedNumbers = [];
   const dependencies = successfulDependencies([]);
   dependencies.searchReviewRequestedPRs = async ({ repo }) =>
-    Array.from({ length: MAX_CANDIDATE_METADATA_PER_POLL + 1 }, (_, index) => ({
+    completeSearch(Array.from({ length: MAX_CANDIDATE_METADATA_PER_POLL + 1 }, (_, index) => ({
       repo,
       number: index + 1,
-    }));
+    })));
   dependencies.getPullRequest = async ({ repo, number }) => {
     metadataNumbers.push(number);
     return {
@@ -1680,10 +1779,10 @@ test('candidate metadata overflow rotates its window so later PRs do not starve'
   const reviewedNumbers = [];
   const dependencies = successfulDependencies([]);
   dependencies.searchReviewRequestedPRs = async ({ repo }) =>
-    Array.from({ length: MAX_CANDIDATE_METADATA_PER_POLL + 1 }, (_, index) => ({
+    completeSearch(Array.from({ length: MAX_CANDIDATE_METADATA_PER_POLL + 1 }, (_, index) => ({
       repo,
       number: index + 1,
-    }));
+    })));
   dependencies.getPullRequest = async ({ repo, number }) => {
     metadataNumbers.push(number);
     return {
@@ -1741,10 +1840,10 @@ test('already-posted reconciliations release safety capacity for a later changed
   const postedNumbers = [];
   const dependencies = successfulDependencies([]);
   dependencies.searchReviewRequestedPRs = async ({ repo }) =>
-    Array.from({ length: MAX_REVIEWS_PER_POLL + 1 }, (_, index) => ({
+    completeSearch(Array.from({ length: MAX_REVIEWS_PER_POLL + 1 }, (_, index) => ({
       repo,
       number: index + 1,
-    }));
+    })));
   dependencies.getPullRequest = async ({ repo, number }) => ({
     headRefOid: 'new-sha',
     number,
@@ -1788,7 +1887,7 @@ test('tracked-only backlog consumes no metadata budget or deferral capacity', as
   await saveState(files.stateFile, trackedState);
 
   const dependencies = successfulDependencies([]);
-  dependencies.searchReviewRequestedPRs = async () => [];
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([]);
   dependencies.getPullRequest = async ({ number }) => {
     metadataCandidates.push(number);
     throw new Error('tracked-only backlog must not reach metadata');
@@ -1830,10 +1929,10 @@ test('failed requested-state cleanup rolls back and does not block a valid candi
   });
 
   const dependencies = successfulDependencies([]);
-  dependencies.searchReviewRequestedPRs = async () => [{
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([{
     repo: 'owner/repo',
     number: 2,
-  }];
+  }]);
   dependencies.getPullRequest = async ({ number }) => ({
     headRefOid: `new-${number}`,
     number,
@@ -1886,7 +1985,7 @@ test('failed requested-state cleanup preserves a mixed-case state file without m
   await writeFile(files.stateFile, JSON.stringify(initialState));
 
   const dependencies = successfulDependencies([]);
-  dependencies.searchReviewRequestedPRs = async () => [];
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([]);
   let metadataCalls = 0;
   dependencies.getPullRequest = async () => {
     metadataCalls += 1;
@@ -1926,7 +2025,9 @@ test('a requested PR already present in state is admitted only once', async (t) 
   });
 
   const dependencies = successfulDependencies([]);
-  dependencies.searchReviewRequestedPRs = async () => [{ repo: 'owner/repo', number: 7 }];
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([
+    { repo: 'owner/repo', number: 7 },
+  ]);
   dependencies.getPullRequest = async ({ number }) => {
     metadataNumbers.push(number);
     return {
@@ -1967,7 +2068,9 @@ test('requested repository aliases are de-duplicated while API spelling is prese
   );
 
   const dependencies = successfulDependencies([]);
-  dependencies.searchReviewRequestedPRs = async () => [{ repo: 'Owner/repo', number: 7 }];
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([
+    { repo: 'Owner/repo', number: 7 },
+  ]);
   dependencies.getPullRequest = async ({ repo }) => {
     metadataRepos.push(repo);
     return {
@@ -2288,10 +2391,10 @@ for (const [label, confirmationMetadata] of [
 
     const events = [];
     const dependencies = successfulDependencies(events);
-    dependencies.searchReviewRequestedPRs = async () => [
+    dependencies.searchReviewRequestedPRs = async () => completeSearch([
       { repo: 'owner/repo', number: 1 },
       { repo: 'owner/repo', number: 2 },
-    ];
+    ]);
     const metadataCalls = new Map();
     dependencies.getPullRequest = async ({ number }) => {
       const calls = (metadataCalls.get(number) ?? 0) + 1;
@@ -2933,8 +3036,9 @@ test('a fresh request repairs marker state after trusted cleanup prunes it', asy
   let reviewerCalls = 0;
   let postCalls = 0;
   const dependencies = successfulDependencies([]);
-  dependencies.searchReviewRequestedPRs = async ({ repo }) =>
-    requestActive ? [{ repo, number: 7 }] : [];
+  dependencies.searchReviewRequestedPRs = async ({ repo }) => completeSearch(
+    requestActive ? [{ repo, number: 7 }] : [],
+  );
   dependencies.reviewAlreadyPosted = async () => true;
   dependencies.invokeMultiPassReview = async () => {
     reviewerCalls += 1;

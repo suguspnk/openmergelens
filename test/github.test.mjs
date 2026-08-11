@@ -26,6 +26,27 @@ import {
   MAX_DIFF_ANCHORS,
 } from '../lib/security-limits.mjs';
 
+function mockGhStdout(t, outputs) {
+  let callIndex = 0;
+  t.mock.method(childProcess, 'spawn', () => {
+    const output = outputs[callIndex];
+    callIndex += 1;
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = {
+      write() {},
+      end() {},
+    };
+    process.nextTick(() => {
+      if (output !== undefined) child.stdout.emit('data', Buffer.from(output));
+      child.emit('close', 0);
+    });
+    return child;
+  });
+  return () => callIndex;
+}
+
 test('any normalized review fits the posting body when all findings are unanchored', async () => {
   const normalized = normalizeReviewObject({
     summary: 's'.repeat(16_000),
@@ -93,6 +114,7 @@ test('explicit repository search preserves concatenated paginated gh output', as
     { repo: 'acme/first', number: 7 },
     { repo: 'acme/second', number: 8 },
   ]);
+  assert.equal(results.complete, true);
 
   assert.equal(command, 'gh');
   assert.equal(spawnCount, 1);
@@ -145,10 +167,8 @@ test('capped review-requested search falls back to the repository pull list', as
     repo: 'acme/repo',
   });
 
-  assert.deepEqual(results, [
-    { repo: 'acme/repo', number: 1 },
-    { repo: 'acme/repo', number: 2001 },
-  ]);
+  assert.deepEqual(results, [{ repo: 'acme/repo', number: 2001 }]);
+  assert.equal(results.complete, true);
   assert.equal(calls.length, 2);
   assert.ok(calls[1].includes('--paginate'));
   assert.ok(calls[1].includes('--method'));
@@ -160,6 +180,116 @@ test('capped review-requested search falls back to the repository pull list', as
     fallbackJq,
     '.[] | select(any(.requested_reviewers[]?; (.login // "") | ascii_downcase == "octocat")) | (.number | tostring)',
   );
+});
+
+test('complete multi-page review-requested search proves every result', async (t) => {
+  const firstPage = Array.from({ length: 100 }, (_, index) =>
+    `https://api.github.com/repos/acme/repo|${index + 1}`
+  ).join('\n');
+  const spawnCount = mockGhStdout(t, [
+    `meta|101|false\n${firstPage}\nmeta|101|false\n` +
+      'https://api.github.com/repos/acme/repo|101\n',
+  ]);
+
+  const results = await searchReviewRequestedPRs({
+    username: 'octocat',
+    repo: 'acme/repo',
+  });
+
+  assert.equal(results.complete, true);
+  assert.equal(results.length, 101);
+  assert.deepEqual(results.at(-1), { repo: 'acme/repo', number: 101 });
+  assert.equal(spawnCount(), 1);
+});
+
+test('empty review-requested search is completeness-proven', async (t) => {
+  mockGhStdout(t, ['meta|0|false\n']);
+
+  const results = await searchReviewRequestedPRs({
+    username: 'octocat',
+    repo: 'acme/repo',
+  });
+
+  assert.deepEqual(results, []);
+  assert.equal(results.complete, true);
+});
+
+for (const { label, output, error } of [
+  {
+    label: 'changing total_count metadata',
+    output:
+      'meta|2|false\n' +
+      'https://api.github.com/repos/acme/repo|7\n' +
+      'meta|1|false\n',
+    error: /inconsistent pagination metadata/u,
+  },
+  {
+    label: 'changing incomplete_results metadata',
+    output:
+      'meta|1|false\n' +
+      'https://api.github.com/repos/acme/repo|7\n' +
+      'meta|1|true\n',
+    error: /inconsistent pagination metadata/u,
+  },
+  {
+    label: 'candidate output without metadata',
+    output: 'https://api.github.com/repos/acme/repo|7\n',
+    error: /candidate without result metadata/u,
+  },
+  {
+    label: 'missing incomplete_results metadata',
+    output:
+      'meta|1|null\n' +
+      'https://api.github.com/repos/acme/repo|7\n',
+    error: /malformed result metadata/u,
+  },
+  {
+    label: 'duplicate candidates',
+    output:
+      'meta|2|false\n' +
+      'https://api.github.com/repos/acme/repo|7\n' +
+      'https://api.github.com/repos/ACME/REPO|7\n',
+    error: /duplicate pull request candidate/u,
+  },
+  {
+    label: 'candidate-count mismatch',
+    output:
+      'meta|2|false\n' +
+      'https://api.github.com/repos/acme/repo|7\n',
+    error: /candidate count did not match result metadata/u,
+  },
+  {
+    label: 'missing page metadata',
+    output: `meta|101|false\n${Array.from({ length: 101 }, (_, index) =>
+      `https://api.github.com/repos/acme/repo|${index + 1}`
+    ).join('\n')}\n`,
+    error: /incomplete pagination metadata/u,
+  },
+]) {
+  test(`review-requested search rejects ${label}`, async (t) => {
+    mockGhStdout(t, [output]);
+
+    await assert.rejects(
+      searchReviewRequestedPRs({ username: 'octocat', repo: 'acme/repo' }),
+      error,
+    );
+  });
+}
+
+test('incomplete search metadata uses only the complete repository fallback', async (t) => {
+  const spawnCount = mockGhStdout(t, [
+    'meta|2|true\nhttps://api.github.com/repos/acme/repo|7\n',
+    '8\n',
+  ]);
+
+  const results = await searchReviewRequestedPRs({
+    username: 'octocat',
+    repo: 'acme/repo',
+  });
+
+  assert.deepEqual(results, [{ repo: 'acme/repo', number: 8 }]);
+  assert.equal(results.complete, true);
+  assert.equal(spawnCount(), 2);
 });
 
 test('pull request metadata includes the current state', async (t) => {

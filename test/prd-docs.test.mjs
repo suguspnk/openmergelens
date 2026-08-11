@@ -32,6 +32,8 @@ test('PRD config shape remains valid for the current validator', async () => {
   assert.match(prd, /State is keyed by reviewer account \+ PR \+ last-reviewed/u);
   assert.match(prd, /request that account again in GitHub's\s+\*\*Reviewers\*\*/u);
   assert.match(prd, /Validated search results are the only source of\s+review candidates/u);
+  assert.match(prd, /stable\s+pagination metadata plus distinct candidate and page counts/u);
+  assert.match(prd, /Only that\s+complete fallback, never partial Search rows, is authoritative/u);
   assert.doesNotMatch(prd, /tracked(?:-state)? fallback/iu);
 });
 
@@ -192,11 +194,13 @@ test('PRD discovery command matches the explicit paginated GitHub search contrac
 
   assert.match(implementation, /'api', '--paginate', '--method', 'GET', '\/search\/issues'/u);
   assert.match(implementation, /review-requested:\$\{normalizedUsername\} repo:\$\{normalizedRepo\}/u);
-  assert.match(implementation, /'-f', 'per_page=100'/u);
+  assert.match(implementation, /'-f', `per_page=\$\{GITHUB_SEARCH_PAGE_SIZE\}`/u);
   assert.match(
     implementation,
     /'--jq',[\s\S]*?\.total_count[\s\S]*?\.incomplete_results[\s\S]*?\.items\[\][\s\S]*?\.repository_url/u,
   );
   assert.match(implementation, /\/repos\/\$\{normalizedRepo\}\/pulls/u);
   assert.match(implementation, /requested_reviewers/u);
+  assert.match(implementation, /candidate count did not match result metadata/u);
+  assert.match(implementation, /inconsistent pagination metadata/u);
 });

@@ -109,14 +109,20 @@ poller as a `pnpm` script / bin.
    matching `CODEOWNERS` rule. Global search is intentionally unsupported:
    coverage must be explicit. After a successful, fully validated search,
    retire state entries in that exact host/account/repository scope when their
-   PR numbers are absent from the results. Authentication failures, search
-   failures, or malformed/foreign results suppress cleanup for that scope;
-   dry runs never mutate state.
+   PR numbers are absent from the results. Cleanup authority requires stable
+   pagination metadata plus distinct candidate and page counts that agree with
+   that metadata. Authentication failures, search failures, pagination that
+   remains incomplete or inconsistent without a successful complete fallback,
+   or count mismatches suppress cleanup and all candidate admission for that
+   scope. Individual malformed or foreign rows are rejected and suppress
+   cleanup while other validated requested rows may proceed; dry runs never
+   mutate state.
    The paginated output starts each page with `meta|total_count|incomplete_results`
    and then emits newline-delimited `repository_url|number` pairs. If Search
    reports more than 1,000 matches or an incomplete result window, the
    implementation falls back to the paginated repository pull-request list
-   endpoint and filters its `requested_reviewers` to the direct user.
+   endpoint and filters its `requested_reviewers` to the direct user. Only that
+   complete fallback, never partial Search rows, is authoritative in this case.
    Global search is intentionally unsupported: coverage must be explicit.
    Resolve each account with `gh auth token --hostname ... --user ...` and
    scope every child command with that credential.
