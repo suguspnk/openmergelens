@@ -2,9 +2,8 @@
 
 Local, agent-agnostic poller that auto-reviews open GitHub PRs whenever a
 configured account is the requested reviewer. The request can be added manually
-or created automatically by a matching `CODEOWNERS` rule. It also re-reviews
-previously reviewed PRs for the exact host, account, and repository when their
-head changes, using a bounded tracked-state fallback rather than global search.
+or created automatically by a matching `CODEOWNERS` rule. It re-reviews a new
+head only when GitHub returns that PR from a fresh active review-request search.
 Posts results as a formal GitHub PR review with inline comments automatically,
 with no per-run approval needed.
 
@@ -33,9 +32,8 @@ the shipped CLI and its tests when behavior changes.
      **new commits since the last review** so a freshly requested re-review can
      target the new head. State is keyed by reviewer account + PR + last-reviewed
      commit SHA, not a boolean seen/unseen flag. new commits alone are not a trigger
-     for an untracked PR; the PR author must request that account again in GitHub's **Reviewers**
-     list before it enters discovery. Previously
-     tracked PRs are eligible through the bounded fallback.
+     for any PR; the PR author must request that account again in GitHub's
+     **Reviewers** list before the new head enters discovery.
   3. Needs a real review prompt, not "review this PR." Prompts are directly
      editable and shared per GitHub host/repository. Durable corrections are
      isolated per GitHub host/account/repository.
@@ -101,18 +99,19 @@ poller as a `pnpm` script / bin.
 
 1. **Discover candidate PRs.** For every configured account and every
    explicitly selected repository, search for open PRs that currently request
-   that account's review, then merge those results with locally tracked PR
-   numbers for the exact host/account/repository. Tracked state is a bounded
-   fallback: it never expands discovery beyond PRs previously recorded for
-   that configured identity and repository. For each target:
+   that account's review. Validated search results are the only source of
+   review candidates; locally tracked PR numbers never enter the queue by
+   themselves. For each target:
    ```bash
    gh api --paginate --method GET /search/issues -f q="is:pr is:open review-requested:USERNAME repo:OWNER/REPO" -f per_page=100 --jq '"meta|" + (.total_count | tostring) + "|" + (.incomplete_results | tostring), (.items[] | .repository_url + "|" + (.number | tostring))'
    ```
    This covers both manual reviewer requests and requests GitHub created from a
    matching `CODEOWNERS` rule. Global search is intentionally unsupported:
-   coverage must be explicit. Requested candidates are prioritized ahead of
-   tracked fallback candidates, and the fallback remains limited to PRs already
-   recorded for that identity and repository.
+   coverage must be explicit. After a successful, fully validated search,
+   retire state entries in that exact host/account/repository scope when their
+   PR numbers are absent from the results. Authentication failures, search
+   failures, or malformed/foreign results suppress cleanup for that scope;
+   dry runs never mutate state.
    The paginated output starts each page with `meta|total_count|incomplete_results`
    and then emits newline-delimited `repository_url|number` pairs. If Search
    reports more than 1,000 matches or an incomplete result window, the
@@ -123,9 +122,9 @@ poller as a `pnpm` script / bin.
    scope every child command with that credential.
 
 2. **Review candidates in bounded concurrent batches.** Build an independent
-   queue per account, deduplicate within that account, prioritize currently
-   requested candidates ahead of tracked fallback candidates, then round-robin
-   the queues into one global queue. Process up to `reviewBatchSize` PRs
+   queue per account, deduplicate validated requested candidates within that
+   account, then round-robin its repository queues into one global queue.
+   Process up to `reviewBatchSize` PRs
    concurrently across all accounts (default `5`), subject to a built-in
    admission cap of three reviews that bounds aggregate diff, gateway, prompt,
    and reviewer-process memory.
@@ -138,8 +137,8 @@ poller as a `pnpm` script / bin.
    - Key: `HOST@USERNAME::OWNER/REPO#N`
    - If key absent → new PR, needs review.
    - If key present and stored SHA != current `headRefOid` → new commits since
-     last review; if this PR was returned by either the requested-reviewer
-     search or the bounded tracked fallback, it needs re-review.
+     last review; if this PR was returned by the active requested-reviewer
+     search, it needs re-review.
    - If key present and SHA matches → skip, already reviewed this exact head.
    - If local state is missing, check the PR's submitted reviews for
      OpenMergeLens's opaque account/repo/commit marker. If found, repair local

@@ -4,6 +4,10 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Fixed review scheduling so only pull requests with a current, validated
+  GitHub review request enter the queue; trustworthy searches also retire stale
+  state without risking cross-account or cross-repository cleanup.
+
 ## [1.5.1] - 2026-08-10
 
 - Increased the default reviewer process timeout to 30 minutes and aligned

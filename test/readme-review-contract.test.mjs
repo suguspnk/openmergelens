@@ -6,6 +6,16 @@ import { fileURLToPath } from 'node:url';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+test('README requires a fresh active request for every review candidate', async () => {
+  const readme = await readFile(path.join(projectRoot, 'README.md'), 'utf8');
+
+  assert.match(readme, /pushing another commit does not start a\s+re-review by itself/u);
+  assert.match(readme, /Locally tracked PRs are never added to the queue on their own/u);
+  assert.match(readme, /Failed or malformed searches retain\s+that state\s+and never use it as a review candidate/u);
+  assert.match(readme, /dry runs never change it/u);
+  assert.doesNotMatch(readme, /tracked fallback/iu);
+});
+
 test('README documents the constrained MCP contract for {{diff}}', async () => {
   const readme = await readFile(path.join(projectRoot, 'README.md'), 'utf8');
   const customizingReviews = readme.match(

@@ -30,7 +30,9 @@ test('PRD config shape remains valid for the current validator', async () => {
   assert.match(prd, /matching `CODEOWNERS` rule/u);
   assert.match(prd, /new commits alone are not a trigger/u);
   assert.match(prd, /State is keyed by reviewer account \+ PR \+ last-reviewed/u);
-  assert.match(prd, /request\s+that account again in GitHub's \*\*Reviewers\*\*/u);
+  assert.match(prd, /request that account again in GitHub's\s+\*\*Reviewers\*\*/u);
+  assert.match(prd, /Validated search results are the only source of\s+review candidates/u);
+  assert.doesNotMatch(prd, /tracked(?:-state)? fallback/iu);
 });
 
 test('project instructions describe the requested-review re-review trigger', async () => {
