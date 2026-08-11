@@ -130,6 +130,18 @@ test('explicit repository search preserves concatenated paginated gh output', as
     Object.getOwnPropertyDescriptor(results, 'complete'),
   );
   assert.equal(isValidatedReviewRequestSearchResult(descriptorClone), false);
+  assert.equal(Object.isFrozen(results), true);
+  assert.equal(Object.isFrozen(results[0]), true);
+  assert.throws(() => {
+    results[0].repo = 'acme/other';
+  }, TypeError);
+  assert.throws(() => {
+    results.push({ repo: 'acme/first', number: 9 });
+  }, TypeError);
+  assert.deepEqual(results, [
+    { repo: 'acme/first', number: 7 },
+    { repo: 'acme/first', number: 8 },
+  ]);
 
   assert.equal(command, 'gh');
   assert.equal(spawnCount, 1);
@@ -182,6 +194,53 @@ test('empty review-requested search is completeness-proven', async (t) => {
   assert.deepEqual(results, []);
   assert.equal(results.complete, true);
 });
+
+for (const [label, encoding] of [
+  ['empty', ''],
+  ['whitespace-only', ' '],
+  ['leading whitespace', ' 1'],
+  ['trailing whitespace', '1 '],
+  ['exponent', '1e0'],
+  ['positive sign', '+1'],
+  ['negative sign', '-1'],
+  ['decimal', '1.0'],
+  ['leading zero', '01'],
+  ['unsafe integer', '9007199254740992'],
+]) {
+  test(`review-requested search rejects ${label} total_count encoding`, async (t) => {
+    mockGhStdout(t, [`meta|${encoding}|false\n`]);
+
+    await assert.rejects(
+      searchReviewRequestedPRs({ username: 'octocat', repo: 'acme/repo' }),
+      /malformed result metadata/u,
+    );
+  });
+}
+
+for (const [label, encoding] of [
+  ['empty', ''],
+  ['whitespace-only', ' '],
+  ['leading whitespace', ' 1'],
+  ['trailing whitespace', '1 '],
+  ['exponent', '1e0'],
+  ['positive sign', '+1'],
+  ['negative sign', '-1'],
+  ['decimal', '1.0'],
+  ['zero', '0'],
+  ['leading zero', '01'],
+  ['unsafe integer', '9007199254740992'],
+]) {
+  test(`review-requested search rejects ${label} PR number encoding`, async (t) => {
+    mockGhStdout(t, [
+      `meta|1|false\nhttps://api.github.com/repos/acme/repo|${encoding}\n`,
+    ]);
+
+    await assert.rejects(
+      searchReviewRequestedPRs({ username: 'octocat', repo: 'acme/repo' }),
+      /malformed pull request candidate/u,
+    );
+  });
+}
 
 for (const { label, output, error } of [
   {

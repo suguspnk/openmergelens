@@ -38,6 +38,33 @@ const personal = {
 };
 
 const validatedTestSearchResults = new WeakSet();
+const nonCanonicalDecimalEncodings = [
+  ['empty', ''],
+  ['whitespace-only', ' '],
+  ['leading-whitespace', ' 1'],
+  ['trailing-whitespace', '1 '],
+  ['exponent', '1e0'],
+  ['positive-sign', '+1'],
+  ['negative-sign', '-1'],
+  ['decimal', '1.0'],
+  ['leading-zero', '01'],
+  ['unsafe-integer', '9007199254740992'],
+];
+const malformedProductionSearchNumberOutputs = [
+  ...nonCanonicalDecimalEncodings.map(([label, encoding]) => ({
+    label: `${label} total_count`,
+    output: `meta|${encoding}|false\n`,
+  })),
+  ...[
+    ...nonCanonicalDecimalEncodings,
+    ['zero', '0'],
+  ].map(([label, encoding]) => ({
+    label: `${label} PR number`,
+    output:
+      'meta|1|false\n' +
+      `https://api.github.com/repos/owner/repo|${encoding}\n`,
+  })),
+];
 
 function config(accounts = [work, personal]) {
   return {
@@ -61,6 +88,23 @@ function completeSearch(candidates) {
 
 function isValidatedTestSearchResult(candidates) {
   return validatedTestSearchResults.has(candidates);
+}
+
+function mockProductionSearchOutput(t, output) {
+  t.mock.method(childProcess, 'spawn', () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = {
+      write() {},
+      end() {},
+    };
+    process.nextTick(() => {
+      child.stdout.emit('data', Buffer.from(output));
+      child.emit('close', 0);
+    });
+    return child;
+  });
 }
 
 async function fixture(t) {
@@ -1149,33 +1193,43 @@ test('production search output remains an Array and passes production provenance
   const files = await fixture(t);
   const events = [];
   const account = { ...work, repositories: ['owner/repo'] };
-  t.mock.method(childProcess, 'spawn', () => {
-    const child = new EventEmitter();
-    child.stdout = new EventEmitter();
-    child.stderr = new EventEmitter();
-    child.stdin = {
-      write() {},
-      end() {},
-    };
-    process.nextTick(() => {
-      child.stdout.emit(
-        'data',
-        Buffer.from(
-          'meta|1|false\n' +
-          'https://api.github.com/repos/owner/repo|7\n',
-        ),
-      );
-      child.emit('close', 0);
-    });
-    return child;
-  });
+  mockProductionSearchOutput(
+    t,
+    'meta|1|false\n' +
+      'https://api.github.com/repos/owner/repo|7\n',
+  );
 
   let searchResult;
+  const mutationErrors = [];
+  const metadataCandidates = [];
   const dependencies = successfulDependencies(events);
   delete dependencies.isValidatedReviewRequestSearchResult;
   dependencies.searchReviewRequestedPRs = async (options) => {
     searchResult = await productionSearchReviewRequestedPRs(options);
+    for (const mutate of [
+      () => { searchResult[0].repo = 'other/repo'; },
+      () => { searchResult[0].number = 99; },
+      () => { searchResult[0] = { repo: 'other/repo', number: 99 }; },
+      () => { searchResult.push({ repo: 'other/repo', number: 99 }); },
+    ]) {
+      try {
+        mutate();
+      } catch (err) {
+        mutationErrors.push(err);
+      }
+    }
     return searchResult;
+  };
+  dependencies.getPullRequest = async ({ repo, number }) => {
+    metadataCandidates.push(`${repo}#${number}`);
+    return {
+      headRefOid: 'sha-1',
+      number,
+      title: 'PR',
+      url: 'https://github.com/owner/repo/pull/7',
+      body: '',
+      state: 'OPEN',
+    };
   };
 
   const result = await pollOnce({
@@ -1186,12 +1240,71 @@ test('production search output remains an Array and passes production provenance
 
   assert.equal(Array.isArray(searchResult), true);
   assert.equal(searchResult.complete, true);
+  assert.equal(Object.isFrozen(searchResult), true);
+  assert.equal(Object.isFrozen(searchResult[0]), true);
+  assert.equal(mutationErrors.length, 4);
+  assert.ok(mutationErrors.every((err) => err instanceof TypeError));
+  assert.ok(metadataCandidates.length > 0);
+  assert.ok(metadataCandidates.every((candidate) => candidate === 'owner/repo#7'));
   assert.equal(result.failed, false);
   assert.equal(result.reviewed, 1);
   assert.deepEqual(result.outcomes.map(({ number, status }) => ({ number, status })), [
     { number: 7, status: 'reviewed' },
   ]);
 });
+
+for (const { label, output } of malformedProductionSearchNumberOutputs) {
+  test(`production parser rejects ${label} without downstream or state work`, async (t) => {
+    const files = await fixture(t);
+    const account = { ...work, repositories: ['owner/repo'] };
+    const requestedCursorKey = 'github.com@work::owner/repo::requested';
+    const initialState = {
+      [prKey('owner/repo', 8, account)]: {
+        lastReviewedSha: 'sha-old',
+        lastReviewedAt: '2026-08-05T00:00:00.000Z',
+      },
+      [STATE_METADATA_KEY]: {
+        version: 1,
+        candidateCursors: { [requestedCursorKey]: 4 },
+      },
+    };
+    await saveState(files.stateFile, initialState);
+    mockProductionSearchOutput(t, output);
+
+    const calls = [];
+    const dependencies = successfulDependencies([]);
+    delete dependencies.isValidatedReviewRequestSearchResult;
+    dependencies.searchReviewRequestedPRs = productionSearchReviewRequestedPRs;
+    dependencies.getPullRequest = async () => {
+      calls.push('metadata');
+    };
+    dependencies.getPullRequestDiff = async () => {
+      calls.push('diff');
+    };
+    dependencies.invokeMultiPassReview = async () => {
+      calls.push('reviewer');
+    };
+    dependencies.postReview = async () => {
+      calls.push('post');
+    };
+    dependencies.saveState = async () => {
+      calls.push('state-or-cursor-save');
+    };
+
+    const result = await pollOnce({
+      config: config([account]),
+      ...files,
+      dependencies,
+    });
+
+    assert.equal(result.failed, true);
+    assert.equal(result.reviewed, 0);
+    assert.deepEqual(result.outcomes, []);
+    assert.deepEqual(result.failures.map(({ note }) => note), ['search failed']);
+    assert.deepEqual(calls, []);
+    assert.deepEqual(JSON.parse(await readFile(files.stateFile, 'utf8')), initialState);
+  });
+}
 
 for (const { label, installMarker } of [
   {

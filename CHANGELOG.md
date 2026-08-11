@@ -9,8 +9,9 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
   counts must prove complete, and incomplete, capped, malformed, or foreign
   discovery fails the repository scope closed. Polling accepts only results
   carrying module-private validation provenance; public properties cannot forge
-  admission. Search absence never deletes historical review state or scheduling
-  cursors.
+  admission. Counts and pull-request numbers require canonical decimal encoding,
+  and validated candidate snapshots are immutable. Search absence never deletes
+  historical review state or scheduling cursors.
 
 ## [1.5.1] - 2026-08-10
 
