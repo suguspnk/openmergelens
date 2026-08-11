@@ -12,6 +12,14 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
   admission. Counts and pull-request numbers require canonical decimal encoding,
   and validated candidate snapshots are immutable. Search absence never deletes
   historical review state or scheduling cursors.
+- Revalidated the exact active user review request after review generation and
+  immediately before every review POST, including the HTTP 422 fallback, while
+  preserving read-only post reconciliation after GitHub clears the request.
+  Late confirmed closure or merge now retires only the matching account state
+  key with rollback on persistence failure.
+- Bounded review state to 10,000 records and 16 MiB, added canonical field
+  validation and safe new-key capacity reservations, and introduced exact
+  365-day expiry plus a deterministic 25-record-per-poll scoped closure sweep.
 
 ## [1.5.1] - 2026-08-10
 

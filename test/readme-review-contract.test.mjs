@@ -14,8 +14,14 @@ test('README requires a fresh active request for every review candidate', async 
   assert.match(readme, /Search pagination\s+metadata and the distinct candidate count must agree/u);
   assert.match(readme, /malformed\s+or foreign row fail the whole repository scope closed/u);
   assert.match(readme, /Historical state and scheduling cursors are retained when a PR is\s+absent from Search/u);
-  assert.match(readme, /A requested PR that is fetched and found closed or merged is still\s+retired/u);
+  assert.match(readme, /A requested PR that is fetched and found closed or merged is retired/u);
   assert.match(readme, /Dry runs never change\s+state/u);
+  assert.match(readme, /revalidates the exact, case-insensitive requested-reviewer\s+login after generation and immediately before every review POST/u);
+  assert.match(readme, /Read-only reconciliation after an ambiguous or successful\s+POST remains allowed/u);
+  assert.match(readme, /Review records expire 365 days/u);
+  assert.match(readme, /at most 25 deterministic, rotating\s+historical records/u);
+  assert.match(readme, /state file is limited to\s+10,000 review records and 16 MiB/u);
+  assert.match(readme, /still-requested PR can become eligible again after its record expires/u);
   assert.doesNotMatch(readme, /tracked fallback/iu);
 });
 

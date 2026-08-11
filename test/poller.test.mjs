@@ -16,7 +16,9 @@ import {
 } from '../lib/github-mutation-queue.mjs';
 import {
   MAX_CONCURRENT_REVIEW_ADMISSIONS,
+  MAX_REVIEW_STATE_ENTRIES,
   MAX_REVIEWS_PER_POLL,
+  MAX_STATE_GC_CHECKS_PER_POLL,
 } from '../lib/security-limits.mjs';
 import { MAX_CANDIDATE_METADATA_PER_POLL } from '../lib/poller.mjs';
 import {
@@ -146,7 +148,16 @@ function successfulDependencies(events) {
       body: '',
       state: 'OPEN',
     }),
+    getPullRequestForStateGc: async ({ repo, number }) => ({
+      headRefOid: `tracked-sha-${number}`,
+      number,
+      title: 'Tracked PR',
+      url: `https://github.com/${repo}/pull/${number}`,
+      body: '',
+      state: 'OPEN',
+    }),
     getPullRequestDiff: async () => '@@ -0,0 +1 @@\n+line\n',
+    hasActiveReviewRequest: async () => true,
     reviewAlreadyPosted: async () => false,
     ensureReviewPrompt: async () => '/virtual/prompt.md',
     readPrompt: async () => '{{diff}}',
@@ -198,6 +209,14 @@ function admissionStressDependencies(failureStage, stats) {
       state: 'OPEN',
       repo,
     }),
+    getPullRequestForStateGc: async ({ repo, number }) => ({
+      headRefOid: `tracked-sha-${number}`,
+      number,
+      title: `Tracked PR ${number}`,
+      url: `https://github.com/${repo}/pull/${number}`,
+      body: '',
+      state: 'OPEN',
+    }),
     getPullRequestDiff: async ({ number }) => {
       stats.activeDiffs += 1;
       stats.maxActiveDiffs = Math.max(stats.maxActiveDiffs, stats.activeDiffs);
@@ -207,6 +226,7 @@ function admissionStressDependencies(failureStage, stats) {
       fail('diff', number);
       return `@@ -0,0 +1 @@\n+${'x'.repeat(1024 * 1024)}\n`;
     },
+    hasActiveReviewRequest: async () => true,
     reviewAlreadyPosted: async () => false,
     ensureReviewPrompt: async () => '/virtual/prompt.md',
     readPrompt: async () => '{{diff}}',
@@ -261,7 +281,7 @@ test('two requested accounts independently review and persist the same PR', asyn
   ]);
   assert.equal(
     events.filter((event) => event === 'github:scheduled').length,
-    14,
+    16,
   );
   assert.deepEqual(events.filter((event) => event.startsWith('review:')).sort(), [
     'review:learning:personal',
@@ -588,13 +608,14 @@ test('initial reconciliation rate limits back off the next PR before it can post
     1_000,
     1_000,
     1_000,
+    1_000,
   ]);
   assert.deepEqual(events, [
     'reconcile:1@24000',
     'reconcile:2@29000',
     'diff:2@30000',
     'review:2@30000',
-    'post:2@32000',
+    'post:2@33000',
   ]);
   assert.deepEqual(
     Object.keys(JSON.parse(await readFile(files.stateFile, 'utf8'))),
@@ -729,7 +750,11 @@ test('account schedulers isolate rate-limit backoff without admitting tracked st
     'search:account-b:owner/repo@0',
     'search:account-a:owner/repo@0',
   ]);
-  assert.deepEqual(sleeps, []);
+  assert.deepEqual(sleeps, [{
+    account: 'account-a',
+    host: 'github.com',
+    milliseconds: 5_000,
+  }]);
   assert.equal(queueIndex, 3);
 });
 
@@ -1841,6 +1866,42 @@ test('a requested PR that closes after search is retired without review', async 
   assert.equal(result.failed, false);
   assert.equal(result.reviewed, 0);
   assert.deepEqual(JSON.parse(await readFile(files.stateFile, 'utf8')), {});
+});
+
+test('initial closure cleanup rolls back when state persistence fails', async (t) => {
+  const files = await fixture(t);
+  const key = prKey('owner/repo', 7, work);
+  const initialState = {
+    [key]: {
+      lastReviewedSha: 'old-sha',
+      lastReviewedAt: '2026-08-05T00:00:00.000Z',
+    },
+  };
+  await saveState(files.stateFile, initialState);
+  const dependencies = successfulDependencies([]);
+  dependencies.getPullRequest = async () => ({
+    headRefOid: 'new-sha',
+    number: 7,
+    title: 'PR',
+    url: 'https://github.com/owner/repo/pull/7',
+    body: '',
+    state: 'CLOSED',
+  });
+  dependencies.saveState = async () => { throw new Error('disk full'); };
+
+  const result = await pollOnce({
+    config: config([work]),
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, true);
+  assert.equal(result.reviewed, 0);
+  assert.equal(result.failures[0].note, 'tracking cleanup failed');
+  assert.deepEqual(
+    JSON.parse(await readFile(files.stateFile, 'utf8')),
+    initialState,
+  );
 });
 
 test('search absence retains historical state in every account and repository scope', async (t) => {
@@ -2996,7 +3057,7 @@ test('positive post reconciliation cannot swallow a stale boundary sentinel', as
   );
 });
 
-test('a PR closed at the mutation boundary is skipped without posting or recording', async (t) => {
+test('a PR closed at the mutation boundary retires its exact tracked state', async (t) => {
   const files = await fixture(t);
   const events = [];
   const key = 'github.com@work::owner/repo#7';
@@ -3041,7 +3102,45 @@ test('a PR closed at the mutation boundary is skipped without posting or recordi
     failures: [],
   });
   assert.deepEqual(events.filter((event) => event.startsWith('post:')), []);
-  assert.equal(saveCalls, 0);
+  assert.equal(saveCalls, 1);
+  assert.deepEqual(
+    JSON.parse(await readFile(files.stateFile, 'utf8')),
+    {},
+  );
+});
+
+test('mutation-boundary closure cleanup rolls back when state persistence fails', async (t) => {
+  const files = await fixture(t);
+  const key = prKey('owner/repo', 7, work);
+  const initialState = {
+    [key]: {
+      lastReviewedSha: 'prior-sha',
+      lastReviewedAt: '2026-01-01T00:00:00.000Z',
+    },
+  };
+  await saveState(files.stateFile, initialState);
+
+  const dependencies = successfulDependencies([]);
+  let metadataCalls = 0;
+  dependencies.getPullRequest = async () => ({
+    headRefOid: 'sha-1',
+    number: 7,
+    title: 'PR',
+    url: 'https://github.com/owner/repo/pull/7',
+    body: '',
+    state: ++metadataCalls === 3 ? 'MERGED' : 'OPEN',
+  });
+  dependencies.saveState = async () => { throw new Error('disk full'); };
+
+  const result = await pollOnce({
+    config: config([work]),
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, true);
+  assert.equal(result.reviewed, 0);
+  assert.equal(result.failures[0].note, 'tracking cleanup failed');
   assert.deepEqual(
     JSON.parse(await readFile(files.stateFile, 'utf8')),
     initialState,
@@ -3254,7 +3353,7 @@ test('a dry run classifies findings against the diff without posting or writing 
   assert.deepEqual(result.failures, []);
   assert.match(output.join('\n'), /1 inline finding\(s\); 1 summary-only finding\(s\)/);
   assert.equal(postCalls, 0);
-  assert.equal(events.filter((event) => event === 'github:scheduled').length, 6);
+  assert.equal(events.filter((event) => event === 'github:scheduled').length, 7);
   assert.equal(saveCalls, 0);
   await assert.rejects(readFile(files.stateFile, 'utf8'), { code: 'ENOENT' });
 });
@@ -3343,7 +3442,7 @@ for (const [label, review, expectedError] of [
       true,
     );
     assert.equal(postCalls, 0);
-    assert.equal(events.filter((event) => event === 'github:scheduled').length, 6);
+    assert.equal(events.filter((event) => event === 'github:scheduled').length, 7);
     assert.equal(saveCalls, 0);
     await assert.rejects(readFile(files.stateFile, 'utf8'), { code: 'ENOENT' });
   });
@@ -3396,6 +3495,738 @@ test('a posted review is reconciled after state persistence fails without repost
   assert.equal(
     state['github.com@work::owner/repo#7'].lastReviewedSha,
     'sha-1',
+  );
+});
+
+test('a review request revoked after generation skips posting without failing or recording', async (t) => {
+  const files = await fixture(t);
+  const events = [];
+  const dependencies = successfulDependencies(events);
+  let requestChecks = 0;
+  dependencies.hasActiveReviewRequest = async () => {
+    requestChecks += 1;
+    return false;
+  };
+
+  const result = await pollOnce({
+    config: config([work]),
+    ...files,
+    dependencies,
+  });
+
+  assert.deepEqual(result, {
+    failed: false,
+    reviewed: 0,
+    outcomes: [],
+    failures: [],
+  });
+  assert.equal(requestChecks, 1);
+  assert.deepEqual(events.filter((event) => event.startsWith('post:')), []);
+  await assert.rejects(readFile(files.stateFile, 'utf8'), { code: 'ENOENT' });
+});
+
+test('a review request revoked during cadence wait is rejected at the POST boundary', async (t) => {
+  const files = await fixture(t);
+  const events = [];
+  const dependencies = successfulDependencies(events);
+  let cadenceStarted = false;
+  let requestChecks = 0;
+  dependencies.createGitHubMutationCadence = () => ({
+    run: async (operation, { beforeStart }) => {
+      cadenceStarted = true;
+      await beforeStart();
+      return operation();
+    },
+  });
+  dependencies.hasActiveReviewRequest = async () => {
+    requestChecks += 1;
+    return !cadenceStarted;
+  };
+
+  const result = await pollOnce({
+    config: config([work]),
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(cadenceStarted, true);
+  assert.equal(requestChecks, 2);
+  assert.deepEqual(result, {
+    failed: false,
+    reviewed: 0,
+    outcomes: [],
+    failures: [],
+  });
+  assert.deepEqual(events.filter((event) => event.startsWith('post:')), []);
+  await assert.rejects(readFile(files.stateFile, 'utf8'), { code: 'ENOENT' });
+});
+
+test('a revoked request blocks the 422 fallback POST after reconciliation', async (t) => {
+  const files = await fixture(t);
+  const events = [];
+  const requestMethods = [];
+  const dependencies = successfulDependencies(events);
+  dependencies.getPullRequestDiff = async () =>
+    '+++ b/file.js\n@@ -0,0 +1 @@\n+line\n';
+  dependencies.invokeMultiPassReview = async () => ({
+    summary: 'reviewed',
+    findings: [{
+      path: 'file.js',
+      line: 1,
+      severity: 'major',
+      comment: 'fix this',
+    }],
+  });
+  let requestChecks = 0;
+  dependencies.hasActiveReviewRequest = async () => {
+    requestChecks += 1;
+    return requestChecks < 3;
+  };
+  dependencies.postReview = async (options) => productionPostReview({
+    ...options,
+    request: async (args) => {
+      const method = args[args.indexOf('--method') + 1];
+      requestMethods.push(method);
+      if (method === 'GET') return '';
+      throw Object.assign(new Error('HTTP 422: Validation Failed'), { status: 422 });
+    },
+  });
+
+  const result = await pollOnce({
+    config: config([work]),
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(requestChecks, 3);
+  assert.deepEqual(requestMethods, ['POST', 'GET']);
+  assert.deepEqual(result, {
+    failed: false,
+    reviewed: 0,
+    outcomes: [],
+    failures: [],
+  });
+  await assert.rejects(readFile(files.stateFile, 'utf8'), { code: 'ENOENT' });
+});
+
+test('successful-post reconciliation remains allowed after GitHub clears the request', async (t) => {
+  const files = await fixture(t);
+  const events = [];
+  const requestMethods = [];
+  const dependencies = successfulDependencies(events);
+  let requestActive = true;
+  let requestChecks = 0;
+  dependencies.hasActiveReviewRequest = async () => {
+    requestChecks += 1;
+    return requestActive;
+  };
+  dependencies.postReview = async (options) => {
+    let submitted;
+    return productionPostReview({
+      ...options,
+      request: async (args, requestOptions) => {
+        const method = args[args.indexOf('--method') + 1];
+        requestMethods.push(method);
+        if (method === 'POST') {
+          submitted = JSON.parse(requestOptions.input);
+          requestActive = false;
+          throw new Error('connection reset after accepted response');
+        }
+        return JSON.stringify({
+          body: submitted.body,
+          commit_id: options.commitId,
+          state: 'COMMENTED',
+          user_login: options.auth.username,
+        });
+      },
+    });
+  };
+
+  const result = await pollOnce({
+    config: config([work]),
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, false);
+  assert.equal(result.reviewed, 1);
+  assert.equal(result.outcomes[0].status, 'reviewed');
+  assert.equal(requestChecks, 2);
+  assert.deepEqual(requestMethods, ['POST', 'GET']);
+  const state = JSON.parse(await readFile(files.stateFile, 'utf8'));
+  assert.equal(state[prKey('owner/repo', 7, work)].lastReviewedSha, 'sha-1');
+});
+
+for (const boundary of ['post-generation', 'mutation']) {
+  test(`${boundary} review-request lookup failures fail closed without posting`, async (t) => {
+    const files = await fixture(t);
+    const events = [];
+    const dependencies = successfulDependencies(events);
+    let requestChecks = 0;
+    dependencies.hasActiveReviewRequest = async () => {
+      requestChecks += 1;
+      if (boundary === 'post-generation' || requestChecks === 2) {
+        throw new Error('requested-reviewer lookup failed');
+      }
+      return true;
+    };
+
+    const result = await pollOnce({
+      config: config([work]),
+      ...files,
+      dependencies,
+    });
+
+    assert.equal(result.failed, true);
+    assert.equal(result.reviewed, 0);
+    assert.equal(
+      result.failures[0].note,
+      boundary === 'post-generation'
+        ? 'review request verification failed'
+        : 'review post failed',
+    );
+    assert.deepEqual(events.filter((event) => event.startsWith('post:')), []);
+    await assert.rejects(readFile(files.stateFile, 'utf8'), { code: 'ENOENT' });
+  });
+}
+
+test('closure after generation retires only the exact reviewer state key', async (t) => {
+  const files = await fixture(t);
+  const workKey = prKey('owner/repo', 7, work);
+  const personalKey = prKey('owner/repo', 7, personal);
+  const initialState = {
+    [workKey]: {
+      lastReviewedSha: 'work-old',
+      lastReviewedAt: '2026-01-01T00:00:00.000Z',
+    },
+    [personalKey]: {
+      lastReviewedSha: 'personal-old',
+      lastReviewedAt: '2026-01-01T00:00:00.000Z',
+    },
+  };
+  await saveState(files.stateFile, initialState);
+  const dependencies = successfulDependencies([]);
+  let metadataCalls = 0;
+  dependencies.getPullRequest = async () => ({
+    headRefOid: 'sha-1',
+    number: 7,
+    title: 'PR',
+    url: 'https://github.com/owner/repo/pull/7',
+    body: '',
+    state: ++metadataCalls === 2 ? 'CLOSED' : 'OPEN',
+  });
+
+  const result = await pollOnce({
+    config: config([work]),
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, false);
+  assert.equal(result.reviewed, 0);
+  const state = JSON.parse(await readFile(files.stateFile, 'utf8'));
+  assert.equal(state[workKey], undefined);
+  assert.deepEqual(state[personalKey], initialState[personalKey]);
+});
+
+for (const dryRun of [false, true]) {
+  test(`post-generation closure ${dryRun ? 'is retained in dry run' : 'rolls back on cleanup save failure'}`, async (t) => {
+    const files = await fixture(t);
+    const key = prKey('owner/repo', 7, work);
+    const initialState = {
+      [key]: {
+        lastReviewedSha: 'old-sha',
+        lastReviewedAt: '2026-01-01T00:00:00.000Z',
+      },
+    };
+    await saveState(files.stateFile, initialState);
+    const dependencies = successfulDependencies([]);
+    let metadataCalls = 0;
+    dependencies.getPullRequest = async () => ({
+      headRefOid: 'sha-1',
+      number: 7,
+      title: 'PR',
+      url: 'https://github.com/owner/repo/pull/7',
+      body: '',
+      state: ++metadataCalls === 2 ? 'MERGED' : 'OPEN',
+    });
+    if (!dryRun) {
+      dependencies.saveState = async () => { throw new Error('disk full'); };
+    }
+
+    const result = await pollOnce({
+      config: config([work]),
+      ...files,
+      dryRun,
+      dependencies,
+    });
+
+    assert.equal(result.failed, !dryRun);
+    if (!dryRun) assert.equal(result.failures[0].note, 'tracking cleanup failed');
+    assert.deepEqual(
+      JSON.parse(await readFile(files.stateFile, 'utf8')),
+      initialState,
+    );
+  });
+}
+
+test('historical-state GC checks at most 25 keys and advances fairly from its cursor', async (t) => {
+  const files = await fixture(t);
+  const initialState = Object.fromEntries(
+    Array.from({ length: 30 }, (_, index) => [
+      prKey('owner/repo', index + 1, work),
+      {
+        lastReviewedSha: `sha-${index + 1}`,
+        lastReviewedAt: '2026-08-05T00:00:00.000Z',
+      },
+    ]),
+  );
+  await saveState(files.stateFile, initialState);
+  const expectedKeys = Object.keys(initialState).sort();
+
+  async function runSweep(checked) {
+    const dependencies = successfulDependencies([]);
+    dependencies.searchReviewRequestedPRs = async () => completeSearch([]);
+    dependencies.getPullRequestForStateGc = async ({ repo, number }) => {
+      checked.push(prKey(repo, number, work));
+      return {
+        headRefOid: `sha-${number}`,
+        number,
+        title: 'Tracked PR',
+        url: `https://github.com/${repo}/pull/${number}`,
+        body: '',
+        state: 'OPEN',
+      };
+    };
+    return pollOnce({
+      config: config([work]),
+      ...files,
+      dependencies,
+    });
+  }
+
+  const firstChecked = [];
+  const first = await runSweep(firstChecked);
+  assert.equal(first.failed, false);
+  assert.deepEqual(
+    firstChecked,
+    expectedKeys.slice(0, MAX_STATE_GC_CHECKS_PER_POLL),
+  );
+  let state = JSON.parse(await readFile(files.stateFile, 'utf8'));
+  assert.equal(
+    state[STATE_METADATA_KEY].reviewStateGcAfterKey,
+    expectedKeys[MAX_STATE_GC_CHECKS_PER_POLL - 1],
+  );
+
+  const secondChecked = [];
+  const second = await runSweep(secondChecked);
+  assert.equal(second.failed, false);
+  assert.equal(secondChecked.length, MAX_STATE_GC_CHECKS_PER_POLL);
+  assert.deepEqual(secondChecked.slice(0, 5), expectedKeys.slice(25));
+  assert.deepEqual(secondChecked.slice(5), expectedKeys.slice(0, 20));
+});
+
+test('historical-state GC deletes only confirmed closed states and retains failures', async (t) => {
+  const files = await fixture(t);
+  const initialState = Object.fromEntries(
+    Array.from({ length: 5 }, (_, index) => [
+      prKey('owner/repo', index + 1, work),
+      {
+        lastReviewedSha: `sha-${index + 1}`,
+        lastReviewedAt: '2026-08-05T00:00:00.000Z',
+      },
+    ]),
+  );
+  await saveState(files.stateFile, initialState);
+  const dependencies = successfulDependencies([]);
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([]);
+  dependencies.getPullRequestForStateGc = async ({ repo, number }) => {
+    if (number === 4) {
+      throw Object.assign(new Error('HTTP 404: Not Found'), { status: 404 });
+    }
+    if (number === 5) return { state: 'CLOSED' };
+    return {
+      headRefOid: `sha-${number}`,
+      number,
+      title: 'Tracked PR',
+      url: `https://github.com/${repo}/pull/${number}`,
+      body: '',
+      state: number === 1 ? 'CLOSED' : number === 2 ? 'MERGED' : 'OPEN',
+    };
+  };
+
+  const result = await pollOnce({
+    config: config([work]),
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, false);
+  const state = JSON.parse(await readFile(files.stateFile, 'utf8'));
+  assert.equal(state[prKey('owner/repo', 1, work)], undefined);
+  assert.equal(state[prKey('owner/repo', 2, work)], undefined);
+  for (const number of [3, 4, 5]) {
+    assert.deepEqual(
+      state[prKey('owner/repo', number, work)],
+      initialState[prKey('owner/repo', number, work)],
+    );
+  }
+});
+
+test('historical-state GC is isolated to selected authenticated account repositories', async (t) => {
+  const files = await fixture(t);
+  const enterprise = {
+    hostname: 'enterprise.example.com',
+    username: 'work',
+    repositories: ['owner/repo'],
+  };
+  const initialState = {
+    [prKey('owner/repo', 1, work)]: {
+      lastReviewedSha: 'selected',
+      lastReviewedAt: '2026-08-05T00:00:00.000Z',
+    },
+    [prKey('owner/repo', 2, personal)]: {
+      lastReviewedSha: 'sibling-account',
+      lastReviewedAt: '2026-08-05T00:00:00.000Z',
+    },
+    [prKey('other/repo', 3, work)]: {
+      lastReviewedSha: 'unconfigured-repo',
+      lastReviewedAt: '2026-08-05T00:00:00.000Z',
+    },
+    [prKey('owner/repo', 4, enterprise)]: {
+      lastReviewedSha: 'unselected-host',
+      lastReviewedAt: '2026-08-05T00:00:00.000Z',
+    },
+    'owner/repo#5': {
+      lastReviewedSha: 'unscoped',
+      lastReviewedAt: '2026-08-05T00:00:00.000Z',
+    },
+  };
+  await saveState(files.stateFile, initialState);
+  const checked = [];
+  const dependencies = successfulDependencies([]);
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([]);
+  dependencies.getPullRequestForStateGc = async ({ repo, number }) => {
+    checked.push(`${repo}#${number}`);
+    return {
+      headRefOid: 'sha',
+      number,
+      title: 'Tracked PR',
+      url: `https://github.com/${repo}/pull/${number}`,
+      body: '',
+      state: 'OPEN',
+    };
+  };
+
+  const result = await pollOnce({
+    config: config([work, personal]),
+    accountSelector: { hostname: 'github.com', username: 'work' },
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, false);
+  assert.deepEqual(checked, ['owner/repo#1']);
+  assert.deepEqual(JSON.parse(await readFile(files.stateFile, 'utf8')), initialState);
+});
+
+test('historical-state GC rolls back its whole deletion batch when persistence fails', async (t) => {
+  const files = await fixture(t);
+  const initialState = {
+    [prKey('owner/repo', 1, work)]: {
+      lastReviewedSha: 'sha-1',
+      lastReviewedAt: '2026-08-05T00:00:00.000Z',
+    },
+    [prKey('owner/repo', 2, work)]: {
+      lastReviewedSha: 'sha-2',
+      lastReviewedAt: '2026-08-05T00:00:00.000Z',
+    },
+  };
+  await saveState(files.stateFile, initialState);
+  const dependencies = successfulDependencies([]);
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([]);
+  dependencies.getPullRequestForStateGc = async ({ repo, number }) => ({
+    headRefOid: `sha-${number}`,
+    number,
+    title: 'Tracked PR',
+    url: `https://github.com/${repo}/pull/${number}`,
+    body: '',
+    state: 'CLOSED',
+  });
+  dependencies.saveState = async () => { throw new Error('disk full'); };
+
+  const result = await pollOnce({
+    config: config([work]),
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, true);
+  assert.equal(result.failures[0].note, 'state GC persistence failed');
+  assert.deepEqual(JSON.parse(await readFile(files.stateFile, 'utf8')), initialState);
+});
+
+test('dry runs never execute or persist historical-state GC', async (t) => {
+  const files = await fixture(t);
+  const initialState = {
+    [prKey('owner/repo', 1, work)]: {
+      lastReviewedSha: 'sha-1',
+      lastReviewedAt: '2026-08-05T00:00:00.000Z',
+    },
+  };
+  await saveState(files.stateFile, initialState);
+  const dependencies = successfulDependencies([]);
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([]);
+  let gcChecks = 0;
+  let saveCalls = 0;
+  dependencies.getPullRequestForStateGc = async () => { gcChecks += 1; };
+  dependencies.saveState = async () => { saveCalls += 1; };
+
+  const result = await pollOnce({
+    config: config([work]),
+    ...files,
+    dryRun: true,
+    dependencies,
+  });
+
+  assert.equal(result.failed, false);
+  assert.equal(gcChecks, 0);
+  assert.equal(saveCalls, 0);
+  assert.deepEqual(JSON.parse(await readFile(files.stateFile, 'utf8')), initialState);
+});
+
+test('retention expires deconfigured and unscoped state without remotely sweeping them', async (t) => {
+  const files = await fixture(t);
+  const now = Date.parse('2026-08-11T00:00:00.000Z');
+  const deconfiguredKey = prKey('owner/repo', 1, personal);
+  const unscopedKey = 'owner/repo#2';
+  const selectedKey = prKey('owner/repo', 3, work);
+  await saveState(files.stateFile, {
+    [deconfiguredKey]: {
+      lastReviewedSha: 'old-personal',
+      lastReviewedAt: '2025-08-11T00:00:00.000Z',
+    },
+    [unscopedKey]: {
+      lastReviewedSha: 'old-unscoped',
+      lastReviewedAt: '2025-08-11T00:00:00.000Z',
+    },
+    [selectedKey]: {
+      lastReviewedSha: 'current',
+      lastReviewedAt: '2025-08-11T00:00:00.001Z',
+    },
+  });
+  const checked = [];
+  const dependencies = successfulDependencies([]);
+  dependencies.now = () => now;
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([]);
+  dependencies.getPullRequestForStateGc = async ({ repo, number }) => {
+    checked.push(`${repo}#${number}`);
+    return {
+      headRefOid: 'current',
+      number,
+      title: 'Tracked PR',
+      url: `https://github.com/${repo}/pull/${number}`,
+      body: '',
+      state: 'OPEN',
+    };
+  };
+
+  const result = await pollOnce({
+    config: config([work]),
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, false);
+  assert.deepEqual(checked, ['owner/repo#3']);
+  const state = JSON.parse(await readFile(files.stateFile, 'utf8'));
+  assert.equal(state[deconfiguredKey], undefined);
+  assert.equal(state[unscopedKey], undefined);
+  assert.ok(state[selectedKey]);
+});
+
+test('retention expiry rolls back and stops before external work when saving fails', async (t) => {
+  const files = await fixture(t);
+  const key = prKey('owner/repo', 1, work);
+  const initialState = {
+    [key]: {
+      lastReviewedSha: 'old-sha',
+      lastReviewedAt: '2025-08-11T00:00:00.000Z',
+    },
+  };
+  await saveState(files.stateFile, initialState);
+  let authCalls = 0;
+  const dependencies = successfulDependencies([]);
+  dependencies.now = () => Date.parse('2026-08-11T00:00:00.000Z');
+  dependencies.resolveGitHubAuth = async () => {
+    authCalls += 1;
+    return { ...work, token: 'token' };
+  };
+  dependencies.saveState = async () => { throw new Error('disk full'); };
+
+  const result = await pollOnce({
+    config: config([work]),
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, true);
+  assert.equal(result.reviewed, 0);
+  assert.equal(result.failures[0].note, 'retention cleanup failed');
+  assert.equal(authCalls, 0);
+  assert.deepEqual(
+    JSON.parse(await readFile(files.stateFile, 'utf8')),
+    initialState,
+  );
+});
+
+function capacityState(entryCount) {
+  return Object.fromEntries(
+    Array.from({ length: entryCount }, (_, index) => [
+      prKey('owner/repo', index + 1, work),
+      {
+        lastReviewedSha: `old-${index + 1}`,
+        lastReviewedAt: '2026-08-05T00:00:00.000Z',
+      },
+    ]),
+  );
+}
+
+test('state capacity fails before posting a new key but permits an existing-key update', async (t) => {
+  const files = await fixture(t);
+  const fullState = capacityState(MAX_REVIEW_STATE_ENTRIES);
+  let lastSaved;
+  const dependencies = successfulDependencies([]);
+  dependencies.loadState = async () => fullState;
+  dependencies.saveState = async (_path, state) => {
+    lastSaved = structuredClone(state);
+  };
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([{
+    repo: 'owner/repo',
+    number: MAX_REVIEW_STATE_ENTRIES + 1,
+  }]);
+  dependencies.getPullRequest = async ({ repo, number }) => ({
+    headRefOid: 'new-sha',
+    number,
+    title: 'PR',
+    url: `https://github.com/${repo}/pull/${number}`,
+    body: '',
+    state: 'OPEN',
+  });
+  let postCalls = 0;
+  dependencies.postReview = async ({ scheduleMutation }) =>
+    scheduleMutation(async () => { postCalls += 1; });
+
+  const blocked = await pollOnce({
+    config: config([work]),
+    ...files,
+    dependencies,
+  });
+  assert.equal(blocked.failed, true);
+  assert.equal(blocked.failures.at(-1).note, 'review state capacity reached');
+  assert.equal(postCalls, 0);
+  assert.equal(lastSaved[prKey('owner/repo', MAX_REVIEW_STATE_ENTRIES + 1, work)], undefined);
+
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([{
+    repo: 'owner/repo',
+    number: 1,
+  }]);
+  const updated = await pollOnce({
+    config: config([work]),
+    ...files,
+    dependencies,
+  });
+  assert.equal(updated.failed, false);
+  assert.equal(updated.outcomes[0].status, 're-reviewed');
+  assert.equal(postCalls, 1);
+  assert.equal(lastSaved[prKey('owner/repo', 1, work)].lastReviewedSha, 'new-sha');
+});
+
+test('concurrent new-key reservations enforce the state capacity before either POST', async (t) => {
+  const files = await fixture(t);
+  const almostFullState = capacityState(MAX_REVIEW_STATE_ENTRIES - 1);
+  let lastSaved;
+  const posted = [];
+  const dependencies = successfulDependencies([]);
+  dependencies.loadState = async () => almostFullState;
+  dependencies.saveState = async (_path, state) => {
+    lastSaved = structuredClone(state);
+  };
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([
+    { repo: 'owner/repo', number: MAX_REVIEW_STATE_ENTRIES },
+    { repo: 'owner/repo', number: MAX_REVIEW_STATE_ENTRIES + 1 },
+  ]);
+  dependencies.getPullRequest = async ({ repo, number }) => ({
+    headRefOid: `new-${number}`,
+    number,
+    title: `PR ${number}`,
+    url: `https://github.com/${repo}/pull/${number}`,
+    body: '',
+    state: 'OPEN',
+  });
+  dependencies.postReview = async ({ number, scheduleMutation }) =>
+    scheduleMutation(async () => { posted.push(number); });
+
+  const result = await pollOnce({
+    config: { ...config([work]), reviewBatchSize: 2 },
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, true);
+  assert.equal(posted.length, 1);
+  assert.equal(result.failures.at(-1).note, 'review state capacity reached');
+  assert.equal(
+    Object.keys(lastSaved).filter((key) => key !== STATE_METADATA_KEY).length,
+    MAX_REVIEW_STATE_ENTRIES,
+  );
+});
+
+test('a failed post releases its new-key reservation for a later candidate', async (t) => {
+  const files = await fixture(t);
+  const almostFullState = capacityState(MAX_REVIEW_STATE_ENTRIES - 1);
+  let lastSaved;
+  const posted = [];
+  const dependencies = successfulDependencies([]);
+  dependencies.loadState = async () => almostFullState;
+  dependencies.saveState = async (_path, state) => {
+    lastSaved = structuredClone(state);
+  };
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([
+    { repo: 'owner/repo', number: MAX_REVIEW_STATE_ENTRIES },
+    { repo: 'owner/repo', number: MAX_REVIEW_STATE_ENTRIES + 1 },
+  ]);
+  dependencies.getPullRequest = async ({ repo, number }) => ({
+    headRefOid: `new-${number}`,
+    number,
+    title: `PR ${number}`,
+    url: `https://github.com/${repo}/pull/${number}`,
+    body: '',
+    state: 'OPEN',
+  });
+  dependencies.postReview = async ({ number, scheduleMutation }) =>
+    scheduleMutation(async () => {
+      posted.push(number);
+      if (number === MAX_REVIEW_STATE_ENTRIES) throw new Error('POST failed');
+    });
+
+  const result = await pollOnce({
+    config: { ...config([work]), reviewBatchSize: 1 },
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, true);
+  assert.deepEqual(posted, [
+    MAX_REVIEW_STATE_ENTRIES,
+    MAX_REVIEW_STATE_ENTRIES + 1,
+  ]);
+  assert.equal(result.outcomes.length, 1);
+  assert.equal(result.outcomes[0].number, MAX_REVIEW_STATE_ENTRIES + 1);
+  assert.equal(result.failures[0].note, 'review post failed');
+  assert.equal(
+    Object.keys(lastSaved).filter((key) => key !== STATE_METADATA_KEY).length,
+    MAX_REVIEW_STATE_ENTRIES,
   );
 });
 

@@ -35,7 +35,24 @@ test('PRD config shape remains valid for the current validator', async () => {
   assert.match(prd, /stable pagination metadata plus\s+distinct candidate and page counts/u);
   assert.match(prd, /incomplete or capped results,[\s\S]*?fail\s+the complete account\/repository scope closed/u);
   assert.match(prd, /absent from a page are never authoritative evidence for deleting review state\s+or scheduling cursors/u);
+  assert.match(prd, /Revalidate that the\s+exact configured user login is still in GitHub's requested-reviewer list/u);
+  assert.match(prd, /Immediately\s+before every POST, including the HTTP 422 summary-only fallback/u);
+  assert.match(prd, /Read-only reconciliation is not a POST mutation and remains permitted/u);
   assert.doesNotMatch(prd, /tracked(?:-state)? fallback/iu);
+});
+
+test('PRD documents bounded compatible review-state retention', async () => {
+  const prd = await readText(path.join(projectRoot, 'PRD.md'));
+
+  assert.match(prd, /Review records expire locally after exactly 365 days/u);
+  assert.match(prd, /at\s+most 25 direct metadata checks/u);
+  assert.match(prd, /selected,\s+authenticated, configured account\/repository scopes/u);
+  assert.match(prd, /search absence, lookup failure,\s+malformed metadata, HTTP 404, and `OPEN` all retain state/u);
+  assert.match(prd, /`reviewStateGcAfterKey` cursor/u);
+  assert.match(prd, /Metadata remains version 1 for additive compatibility/u);
+  assert.match(prd, /16 MiB pre-parse bound and can contain at most 10,000/u);
+  assert.match(prd, /new keys reserve capacity before the external POST/u);
+  assert.match(prd, /still-requested PR can become\s+eligible again after expiry/u);
 });
 
 test('project instructions describe the requested-review re-review trigger', async () => {
@@ -173,7 +190,7 @@ test('PRD discovery command matches the explicit paginated GitHub search contrac
     /1\. \*\*Discover candidate PRs\.\*[\s\S]*?```bash\s*([\s\S]*?)\s*```/u,
   );
   const searchImplementation = github.match(
-    /export async function searchReviewRequestedPRs\([\s\S]*?(?=\nexport async function getPullRequest\()/u,
+    /export async function searchReviewRequestedPRs\([\s\S]*?(?=\nexport async function hasActiveReviewRequest\()/u,
   );
 
   assert.ok(discovery, 'PRD must include the discovery command');

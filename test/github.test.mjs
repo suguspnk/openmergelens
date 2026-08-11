@@ -7,6 +7,7 @@ import {
   diffAnchors,
   getPullRequest,
   getPullRequestDiff,
+  hasActiveReviewRequest,
   isValidatedReviewRequestSearchResult,
   postReview,
   prepareReview,
@@ -24,6 +25,7 @@ import {
   MAX_TIMER_DELAY_MS,
 } from '../lib/github-mutation-queue.mjs';
 import {
+  MAX_ACTIVE_REVIEW_REQUEST_USERS,
   MAX_DIFF_ANCHORS,
 } from '../lib/security-limits.mjs';
 
@@ -358,6 +360,97 @@ test('pull request metadata includes the current state', async (t) => {
   assert.ok(fields.includes('state'));
 });
 
+test('active review-request lookup matches an exact login case-insensitively', async () => {
+  let requestedArgs;
+  const active = await hasActiveReviewRequest({
+    repo: 'Owner/Repo',
+    number: 7,
+    username: 'OctoCat',
+    auth: { hostname: 'github.com', username: 'octocat', token: 'token' },
+    request: async (args) => {
+      requestedArgs = args;
+      return [
+        JSON.stringify({ login: 'someone-else' }),
+        JSON.stringify({ login: 'octocat' }),
+      ].join('\n');
+    },
+  });
+
+  assert.equal(active, true);
+  assert.ok(requestedArgs.includes('/repos/Owner/Repo/pulls/7/requested_reviewers'));
+  assert.ok(requestedArgs.includes('--paginate'));
+  assert.equal(
+    await hasActiveReviewRequest({
+      repo: 'owner/repo',
+      number: 7,
+      username: 'octocat',
+      request: async () => JSON.stringify({ login: 'octocat-team' }),
+    }),
+    false,
+  );
+});
+
+for (const [label, output] of [
+  ['missing login', '{}'],
+  ['non-string login', JSON.stringify({ login: 7 })],
+  ['non-object user', 'null'],
+  ['whitespace-padded login', JSON.stringify({ login: ' octocat ' })],
+  ['invalid login', JSON.stringify({ login: 'octo.cat' })],
+  ['invalid JSON', '{'],
+]) {
+  test(`active review-request lookup rejects ${label}`, async () => {
+    await assert.rejects(
+      hasActiveReviewRequest({
+        repo: 'owner/repo',
+        number: 7,
+        username: 'octocat',
+        request: async () => output,
+      }),
+      /requested reviewers response is malformed/u,
+    );
+  });
+}
+
+test('active review-request lookup rejects oversized user lists and API failures', async () => {
+  const oversized = Array.from(
+    { length: MAX_ACTIVE_REVIEW_REQUEST_USERS + 1 },
+    (_, index) => JSON.stringify({ login: `user-${index}` }),
+  ).join('\n');
+  await assert.rejects(
+    hasActiveReviewRequest({
+      repo: 'owner/repo',
+      number: 7,
+      username: 'octocat',
+      request: async () => oversized,
+    }),
+    /exceeded 1000 users/u,
+  );
+  await assert.rejects(
+    hasActiveReviewRequest({
+      repo: 'owner/repo',
+      number: 7,
+      username: 'octocat',
+      request: async () => { throw new Error('HTTP 503'); },
+    }),
+    /HTTP 503/u,
+  );
+});
+
+test('active review-request lookup validates every returned user after a match', async () => {
+  await assert.rejects(
+    hasActiveReviewRequest({
+      repo: 'owner/repo',
+      number: 7,
+      username: 'octocat',
+      request: async () => [
+        JSON.stringify({ login: 'octocat' }),
+        JSON.stringify({ login: 7 }),
+      ].join('\n'),
+    }),
+    /requested reviewers response is malformed/u,
+  );
+});
+
 test('gh subprocess preserves signal termination metadata', async (t) => {
   t.mock.method(childProcess, 'spawn', () => {
     const child = new EventEmitter();
@@ -507,7 +600,7 @@ test('postReview requires mutation scheduling at its GitHub write boundary', asy
   );
 });
 
-for (const reason of ['stale', 'closed']) {
+for (const reason of ['stale', 'closed', 'revoked']) {
   test(`postReview rethrows a ${reason} mutation-boundary sentinel before reconciliation`, async () => {
     const calls = [];
     const options = reviewOptions({
@@ -814,7 +907,7 @@ test('postReview fallback stops without reconciliation when GitHub rate-limits i
 test('postReview treats an ambiguously successful request as complete after reconciliation', async () => {
   const options = reviewOptions();
   const calls = [];
-  let scheduledMutations = 0;
+  const scheduledOperations = [];
   let submitted;
   const request = async (args, requestOptions) => {
     const method = args[args.indexOf('--method') + 1];
@@ -834,13 +927,16 @@ test('postReview treats an ambiguously successful request as complete after reco
   await postReview({
     ...options,
     request,
-    scheduleMutation: async (operation) => {
-      scheduledMutations += 1;
+    scheduleMutation: async (operation, options) => {
+      scheduledOperations.push(options);
       return operation();
     },
   });
   assert.deepEqual(calls, ['POST', 'GET']);
-  assert.equal(scheduledMutations, 2);
+  assert.deepEqual(scheduledOperations, [
+    { mutation: true },
+    { mutation: false },
+  ]);
   assert.match(submitted.body, new RegExp(options.marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(
     submitted.body,
@@ -851,6 +947,7 @@ test('postReview treats an ambiguously successful request as complete after reco
 test('postReview retries without inline comments only for an unreconciled 422', async () => {
   const calls = [];
   const payloads = [];
+  const scheduledOperations = [];
   const request = async (args, requestOptions) => {
     const method = args[args.indexOf('--method') + 1];
     calls.push(method);
@@ -862,9 +959,21 @@ test('postReview retries without inline comments only for an unreconciled 422', 
     return '{}';
   };
 
-  await postReview({ ...reviewOptions(), request });
+  await postReview({
+    ...reviewOptions(),
+    request,
+    scheduleMutation: async (operation, options) => {
+      scheduledOperations.push(options);
+      return operation();
+    },
+  });
 
   assert.deepEqual(calls, ['POST', 'GET', 'POST']);
+  assert.deepEqual(scheduledOperations, [
+    { mutation: true },
+    { mutation: false },
+    { mutation: true },
+  ]);
   assert.equal(payloads[0].comments.length, 1);
   assert.deepEqual(payloads[1].comments, []);
   assert.match(payloads[1].body, /All findings/);

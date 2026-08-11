@@ -118,8 +118,16 @@ poller as a `pnpm` script / bin.
    or scheduling cursors, because concurrent membership changes can preserve the
    reported count while moving an item across page boundaries. Historical state
    is retained but cannot enter the candidate queue or consume metadata budget.
-   A requested candidate that is fetched and found closed or merged is still
-   retired. Dry runs never mutate state.
+   Review records expire locally after exactly 365 days. Before returning from
+   a real poll, including an empty poll, a separate rotating sweep performs at
+   most 25 direct metadata checks for historical records in selected,
+   authenticated, configured account/repository scopes. It deletes only exact
+   keys directly confirmed `CLOSED` or `MERGED`; search absence, lookup failure,
+   malformed metadata, HTTP 404, and `OPEN` all retain state. Deconfigured and
+   unscoped records receive only local expiry, never remote checks. A requested
+   candidate confirmed closed or merged at initial fetch, after generation, or
+   at the mutation boundary is also retired by exact key. Dry runs never mutate
+   state.
    Global search is intentionally unsupported: coverage must be explicit.
    Resolve each account with `gh auth token --hostname ... --user ...` and
    scope every child command with that credential.
@@ -200,11 +208,15 @@ poller as a `pnpm` script / bin.
    tool/gateway, reconciles those candidates against the current cumulative PR,
    merges duplicate root causes, discards unsupported claims, and returns the
    one summary/findings result to post.
-   Re-fetch metadata after review. If the head SHA changed during inspection,
+   Re-fetch metadata after review. If the PR is closed or merged, retire only
+   that account's exact tracked key. If the head SHA changed during inspection,
    discard the stale result, report the candidate as deferred, and leave state
-   untouched so the next poll retries against the new head. If any pass or
-   synthesis invocation fails or returns malformed output, skip posting and
-   leave state untouched so the next poll retries.
+   untouched so the next poll retries against the new head. Revalidate that the
+   exact configured user login is still in GitHub's requested-reviewer list;
+   a revoked request skips posting, while a failed or malformed lookup fails
+   closed without advancing state. If any pass or synthesis invocation fails
+   or returns malformed output, skip posting and leave state untouched so the
+   next poll retries.
 
 6. **Post the review.** **Decided: formal GitHub PR review via the REST
    reviews endpoint**, not a plain issue comment. It shows up in the PR's review
@@ -230,7 +242,14 @@ poller as a `pnpm` script / bin.
    OpenMergeLens and the authenticated reviewer. The opaque marker remains
    only for idempotent reconciliation, not as the disclosure mechanism.
    Review POSTs are globally serialized with at least one second between
-   mutations and pause according to GitHub rate-limit signals.
+   mutations and pause according to GitHub rate-limit signals. Immediately
+   before every POST, including the HTTP 422 summary-only fallback, re-fetch
+   metadata and the requested-reviewer list and require the PR to be `OPEN`,
+   the head to match, and the exact configured user request to remain active.
+   Revocation is an expected no-post outcome; lookup failure fails closed.
+   Read-only reconciliation is not a POST mutation and remains permitted after
+   a successful or ambiguous POST, because GitHub may clear the request once a
+   review is submitted.
    Findings the adapter couldn't anchor to a specific file/line fall back
    into the top-level review `body` (the summary), so nothing silently
    drops just because a line reference was missing. Include a deterministic,
@@ -403,13 +422,14 @@ corresponding path under `OPENMERGELENS_HOME`).
 {
   "github.com@antonio::OWNER/socialpostai-v2#123": {
     "lastReviewedSha": "abc123...",
-    "lastReviewedAt": "2026-07-24T18:00:00Z"
+    "lastReviewedAt": "2026-07-24T18:00:00.000Z"
   },
   "__openmergelens": {
     "version": 1,
     "candidateCursors": {
       "github.com@antonio::OWNER/socialpostai-v2::requested": 25
-    }
+    },
+    "reviewStateGcAfterKey": "github.com@antonio::OWNER/socialpostai-v2#123"
   }
 }
 ```
@@ -417,6 +437,18 @@ corresponding path under `OPENMERGELENS_HOME`).
 The reserved `__openmergelens` entry is optional scheduler metadata, not a
 review record. It advances bounded candidate windows independently per account,
 repository, and discovery source when one poll cannot inspect every candidate.
+Its optional `reviewStateGcAfterKey` cursor rotates the non-admitting historical
+cleanup sweep. Metadata remains version 1 for additive compatibility.
+
+The file is read with a 16 MiB pre-parse bound and can contain at most 10,000
+review records. Persisted review keys and the GC cursor are limited to 1,024
+characters, SHAs to 128 characters, and canonical ISO timestamps to 64
+characters. Serialized output is checked against the same 16 MiB bound before
+the atomic temporary-file write. Existing records may be updated at capacity;
+new keys reserve capacity before the external POST, and no arbitrary pruning is
+allowed. Review records expire exactly 365 days after `lastReviewedAt`. This
+bounds storage at the cost that an unchanged, still-requested PR can become
+eligible again after expiry if its prior marker cannot be reconciled.
 
 ## Scheduling
 

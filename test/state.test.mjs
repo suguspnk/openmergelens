@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   candidateCursorFor,
+  expireReviewState,
   loadState,
   migrateLegacyStateForReviewer,
   needsReview,
@@ -12,10 +13,19 @@ import {
   normalizeState,
   prKey,
   recordCandidateCursor,
+  recordReviewStateGcAfterKey,
+  reviewStateEntryCount,
+  reviewStateGcAfterKey,
   reviewerKey,
   saveState,
   STATE_METADATA_KEY,
 } from '../lib/state.mjs';
+import {
+  MAX_REVIEW_STATE_ENTRIES,
+  MAX_REVIEW_STATE_KEY_CHARS,
+  MAX_REVIEW_STATE_SHA_CHARS,
+  MAX_STATE_FILE_BYTES,
+} from '../lib/security-limits.mjs';
 
 const reviewer = { hostname: 'github.com', username: 'OctoCat' };
 
@@ -73,6 +83,30 @@ test('candidate scheduling cursors round-trip independently from review entries'
   assert.equal(loaded[prKey('owner/repo', 7, reviewer)].lastReviewedSha, 'sha-7');
 });
 
+test('review-state GC cursor round-trips additively with candidate cursors', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const state = {};
+
+  recordReviewStateGcAfterKey(state, 'github.com@octocat::owner/repo#7');
+  recordCandidateCursor(state, 'github.com@octocat::owner/repo::requested', 4);
+  assert.equal(
+    reviewStateGcAfterKey(state),
+    'github.com@octocat::owner/repo#7',
+  );
+  await saveState(stateFile, state);
+
+  const loaded = await loadState(stateFile);
+  assert.deepEqual(loaded[STATE_METADATA_KEY], {
+    version: 1,
+    candidateCursors: {
+      'github.com@octocat::owner/repo::requested': 4,
+    },
+    reviewStateGcAfterKey: 'github.com@octocat::owner/repo#7',
+  });
+});
+
 test('malformed candidate scheduling metadata fails closed', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -91,6 +125,25 @@ test('malformed candidate scheduling metadata fails closed', async (t) => {
     loadState(stateFile),
     /Invalid review state metadata.*candidate cursor is invalid/,
   );
+});
+
+test('malformed review-state GC cursors fail closed', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  for (const reviewStateGcAfterKey of ['', 7, 'x'.repeat(1_025)]) {
+    await writeFile(stateFile, JSON.stringify({
+      [STATE_METADATA_KEY]: {
+        version: 1,
+        candidateCursors: {},
+        reviewStateGcAfterKey,
+      },
+    }));
+    await assert.rejects(
+      loadState(stateFile),
+      /review-state GC cursor is invalid/u,
+    );
+  }
 });
 
 test('positive numeric PR aliases normalize to decimal keys without losing scope', () => {
@@ -195,8 +248,122 @@ test('loading malformed review entries fails closed', async (t) => {
 
   await assert.rejects(
     loadState(stateFile),
-    /Invalid review state entry.*expected lastReviewedSha and lastReviewedAt strings/,
+    /Invalid review state entry.*expected bounded lastReviewedSha and canonical lastReviewedAt strings/,
   );
+});
+
+test('review-state fields and timestamps are bounded and canonical', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const entry = {
+    lastReviewedSha: 'sha-1',
+    lastReviewedAt: '2026-08-11T00:00:00.000Z',
+  };
+  const malformedStates = [
+    { ['x'.repeat(MAX_REVIEW_STATE_KEY_CHARS + 1)]: entry },
+    { 'owner/repo#1': { ...entry, lastReviewedSha: '' } },
+    {
+      'owner/repo#1': {
+        ...entry,
+        lastReviewedSha: 's'.repeat(MAX_REVIEW_STATE_SHA_CHARS + 1),
+      },
+    },
+    { 'owner/repo#1': { ...entry, lastReviewedAt: 'not-a-date' } },
+    { 'owner/repo#1': { ...entry, lastReviewedAt: '2026-08-11T00:00:00Z' } },
+  ];
+
+  for (const state of malformedStates) {
+    await assert.rejects(saveState(stateFile, state), /Invalid review state entry/u);
+  }
+  await assert.rejects(stat(stateFile), { code: 'ENOENT' });
+});
+
+test('review-state load is byte-bounded before JSON parsing', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  await writeFile(stateFile, Buffer.alloc(MAX_STATE_FILE_BYTES + 1, 0x20));
+
+  await assert.rejects(
+    loadState(stateFile),
+    new RegExp(`file exceeds ${MAX_STATE_FILE_BYTES} bytes`, 'u'),
+  );
+});
+
+test('review-state entry count is bounded on load and save', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const entry = {
+    lastReviewedSha: 'sha',
+    lastReviewedAt: '2026-08-11T00:00:00.000Z',
+  };
+  const oversized = Object.fromEntries(
+    Array.from({ length: MAX_REVIEW_STATE_ENTRIES + 1 }, (_, index) => [
+      `owner/repo#${index + 1}`,
+      entry,
+    ]),
+  );
+
+  await assert.rejects(saveState(stateFile, oversized), /too many review entries/u);
+  await writeFile(stateFile, JSON.stringify(oversized));
+  await assert.rejects(loadState(stateFile), /too many review entries/u);
+});
+
+test('serialized review state is byte-bounded before creating the target file', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const state = {};
+  for (let index = 0; index < MAX_REVIEW_STATE_ENTRIES; index += 1) {
+    const prefix = String(index).padStart(5, '0');
+    state[`${prefix}${'k'.repeat(MAX_REVIEW_STATE_KEY_CHARS - prefix.length)}`] = {
+      lastReviewedSha: 's'.repeat(MAX_REVIEW_STATE_SHA_CHARS),
+      lastReviewedAt: '2026-08-11T00:00:00.000Z',
+    };
+  }
+  state[STATE_METADATA_KEY] = {
+    version: 1,
+    candidateCursors: Object.fromEntries(
+      Array.from({ length: MAX_REVIEW_STATE_ENTRIES }, (_, index) => {
+        const prefix = String(index).padStart(5, '0');
+        return [`${prefix}${'c'.repeat(512 - prefix.length)}`, index];
+      }),
+    ),
+  };
+
+  await assert.rejects(
+    saveState(stateFile, state),
+    new RegExp(`serialized state exceeds ${MAX_STATE_FILE_BYTES} bytes`, 'u'),
+  );
+  await assert.rejects(stat(stateFile), { code: 'ENOENT' });
+});
+
+test('review-state retention expires entries at exactly 365 days', () => {
+  const now = Date.parse('2026-08-11T00:00:00.000Z');
+  const state = {
+    'github.com@work::owner/repo#1': {
+      lastReviewedSha: 'sha-1',
+      lastReviewedAt: '2025-08-11T00:00:00.000Z',
+    },
+    'enterprise.example@old::owner/repo#2': {
+      lastReviewedSha: 'sha-2',
+      lastReviewedAt: '2025-08-11T00:00:00.001Z',
+    },
+    [STATE_METADATA_KEY]: {
+      version: 1,
+      candidateCursors: {},
+    },
+  };
+
+  assert.deepEqual(
+    expireReviewState(state, now),
+    ['github.com@work::owner/repo#1'],
+  );
+  assert.equal(reviewStateEntryCount(state), 1);
+  assert.ok(state['enterprise.example@old::owner/repo#2']);
+  assert.ok(state[STATE_METADATA_KEY]);
 });
 
 test('loading existing state hardens its file mode by default', {
