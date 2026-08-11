@@ -7,6 +7,7 @@ import {
   diffAnchors,
   getPullRequest,
   getPullRequestDiff,
+  isValidatedReviewRequestSearchResult,
   postReview,
   prepareReview,
   retryMetadataFromDiagnostic,
@@ -120,6 +121,15 @@ test('explicit repository search preserves concatenated paginated gh output', as
     value: true,
     writable: false,
   });
+  assert.equal(Array.isArray(results), true);
+  assert.equal(isValidatedReviewRequestSearchResult(results), true);
+  const descriptorClone = [...results];
+  Object.defineProperty(
+    descriptorClone,
+    'complete',
+    Object.getOwnPropertyDescriptor(results, 'complete'),
+  );
+  assert.equal(isValidatedReviewRequestSearchResult(descriptorClone), false);
 
   assert.equal(command, 'gh');
   assert.equal(spawnCount, 1);

@@ -1,10 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import childProcess from 'node:child_process';
 import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pollOnce } from '../lib/poller.mjs';
-import { postReview as productionPostReview } from '../lib/github.mjs';
+import {
+  postReview as productionPostReview,
+  searchReviewRequestedPRs as productionSearchReviewRequestedPRs,
+} from '../lib/github.mjs';
 import {
   createGitHubMutationCadence,
   createGitHubMutationQueue,
@@ -32,6 +37,8 @@ const personal = {
   repositories: ['owner/repo'],
 };
 
+const validatedTestSearchResults = new WeakSet();
+
 function config(accounts = [work, personal]) {
   return {
     configVersion: 5,
@@ -48,7 +55,12 @@ function config(accounts = [work, personal]) {
 
 function completeSearch(candidates) {
   Object.defineProperty(candidates, 'complete', { value: true });
+  validatedTestSearchResults.add(candidates);
   return candidates;
+}
+
+function isValidatedTestSearchResult(candidates) {
+  return validatedTestSearchResults.has(candidates);
 }
 
 async function fixture(t) {
@@ -77,6 +89,7 @@ function successfulDependencies(events) {
     }),
     resolveGitHubAuth: async (account) => ({ ...account, token: `${account.username}-token` }),
     currentUsername: async ({ auth }) => auth.username,
+    isValidatedReviewRequestSearchResult: isValidatedTestSearchResult,
     searchReviewRequestedPRs: async ({ username, repo }) => {
       events.push(`search:${username}:${repo}`);
       return completeSearch([{ repo, number: 7 }]);
@@ -126,6 +139,7 @@ function admissionStressDependencies(failureStage, stats) {
     }),
     resolveGitHubAuth: async (account) => ({ ...account, token: 'token' }),
     currentUsername: async ({ auth }) => auth.username,
+    isValidatedReviewRequestSearchResult: isValidatedTestSearchResult,
     searchReviewRequestedPRs: async ({ repo }) =>
       completeSearch(Array.from({ length: candidateCount }, (_, index) => ({
         repo,
@@ -1073,6 +1087,110 @@ test('a search without completeness proof cannot admit work or clean state', asy
   ]);
   assert.equal(metadataCalls, 0);
   assert.deepEqual(JSON.parse(await readFile(files.stateFile, 'utf8')), initialState);
+});
+
+test('production provenance rejects an exact public descriptor clone without side effects', async (t) => {
+  const files = await fixture(t);
+  const account = { ...work, repositories: ['owner/repo'] };
+  const initialState = {
+    [prKey('owner/repo', 8, account)]: {
+      lastReviewedSha: 'sha-old',
+      lastReviewedAt: '2026-08-05T00:00:00.000Z',
+    },
+  };
+  await saveState(files.stateFile, initialState);
+
+  const forged = [{ repo: 'owner/repo', number: 7 }];
+  Object.defineProperty(forged, 'complete', {
+    configurable: false,
+    enumerable: false,
+    value: true,
+    writable: false,
+  });
+  const calls = [];
+  const dependencies = successfulDependencies([]);
+  // Exercise poller's production-default provenance predicate, not the local
+  // WeakSet used to brand ordinary unit-test fixtures.
+  delete dependencies.isValidatedReviewRequestSearchResult;
+  dependencies.searchReviewRequestedPRs = async () => forged;
+  dependencies.getPullRequest = async () => {
+    calls.push('metadata');
+  };
+  dependencies.getPullRequestDiff = async () => {
+    calls.push('diff');
+  };
+  dependencies.invokeMultiPassReview = async () => {
+    calls.push('reviewer');
+  };
+  dependencies.postReview = async () => {
+    calls.push('post');
+  };
+  dependencies.saveState = async () => {
+    calls.push('state-save');
+  };
+
+  const result = await pollOnce({
+    config: config([account]),
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, true);
+  assert.equal(result.reviewed, 0);
+  assert.deepEqual(result.outcomes, []);
+  assert.deepEqual(result.failures.map(({ note }) => note), [
+    'search completeness unproven',
+  ]);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(JSON.parse(await readFile(files.stateFile, 'utf8')), initialState);
+});
+
+test('production search output remains an Array and passes production provenance', async (t) => {
+  const files = await fixture(t);
+  const events = [];
+  const account = { ...work, repositories: ['owner/repo'] };
+  t.mock.method(childProcess, 'spawn', () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = {
+      write() {},
+      end() {},
+    };
+    process.nextTick(() => {
+      child.stdout.emit(
+        'data',
+        Buffer.from(
+          'meta|1|false\n' +
+          'https://api.github.com/repos/owner/repo|7\n',
+        ),
+      );
+      child.emit('close', 0);
+    });
+    return child;
+  });
+
+  let searchResult;
+  const dependencies = successfulDependencies(events);
+  delete dependencies.isValidatedReviewRequestSearchResult;
+  dependencies.searchReviewRequestedPRs = async (options) => {
+    searchResult = await productionSearchReviewRequestedPRs(options);
+    return searchResult;
+  };
+
+  const result = await pollOnce({
+    config: config([account]),
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(Array.isArray(searchResult), true);
+  assert.equal(searchResult.complete, true);
+  assert.equal(result.failed, false);
+  assert.equal(result.reviewed, 1);
+  assert.deepEqual(result.outcomes.map(({ number, status }) => ({ number, status })), [
+    { number: 7, status: 'reviewed' },
+  ]);
 });
 
 for (const { label, installMarker } of [
