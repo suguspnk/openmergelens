@@ -107,22 +107,19 @@ poller as a `pnpm` script / bin.
    ```
    This covers both manual reviewer requests and requests GitHub created from a
    matching `CODEOWNERS` rule. Global search is intentionally unsupported:
-   coverage must be explicit. After a successful, fully validated search,
-   retire state entries in that exact host/account/repository scope when their
-   PR numbers are absent from the results. Cleanup authority requires stable
-   pagination metadata plus distinct candidate and page counts that agree with
-   that metadata. Authentication failures, search failures, pagination that
-   remains incomplete or inconsistent without a successful complete fallback,
-   or count mismatches suppress cleanup and all candidate admission for that
-   scope. Individual malformed or foreign rows are rejected and suppress
-   cleanup while other validated requested rows may proceed; dry runs never
-   mutate state.
+   coverage must be explicit. Admission requires stable pagination metadata plus
+   distinct candidate and page counts that agree with that metadata.
+   Authentication failures, search failures, incomplete or capped results,
+   inconsistent pagination, count mismatches, or any malformed/foreign row fail
+   the complete account/repository scope closed.
    The paginated output starts each page with `meta|total_count|incomplete_results`
-   and then emits newline-delimited `repository_url|number` pairs. If Search
-   reports more than 1,000 matches or an incomplete result window, the
-   implementation falls back to the paginated repository pull-request list
-   endpoint and filters its `requested_reviewers` to the direct user. Only that
-   complete fallback, never partial Search rows, is authoritative in this case.
+   and then emits newline-delimited `repository_url|number` pairs. Search results
+   absent from a page are never authoritative evidence for deleting review state
+   or scheduling cursors, because concurrent membership changes can preserve the
+   reported count while moving an item across page boundaries. Historical state
+   is retained but cannot enter the candidate queue or consume metadata budget.
+   A requested candidate that is fetched and found closed or merged is still
+   retired. Dry runs never mutate state.
    Global search is intentionally unsupported: coverage must be explicit.
    Resolve each account with `gh auth token --hostname ... --user ...` and
    scope every child command with that credential.

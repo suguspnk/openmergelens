@@ -960,12 +960,13 @@ test('tracked state does not admit metadata or a new-head review without a fresh
   const files = await fixture(t);
   const events = [];
   const account = { ...work, repositories: ['owner/repo'] };
-  await saveState(files.stateFile, {
+  const initialState = {
     [prKey('owner/repo', 7, account)]: {
       lastReviewedSha: 'sha-A',
       lastReviewedAt: '2026-08-05T00:00:00.000Z',
     },
-  });
+  };
+  await saveState(files.stateFile, initialState);
 
   const dependencies = successfulDependencies(events);
   dependencies.searchReviewRequestedPRs = async () => completeSearch([]);
@@ -986,7 +987,7 @@ test('tracked state does not admit metadata or a new-head review without a fresh
   assert.equal(metadataCalls, 0);
   assert.deepEqual(events.filter((event) => event.startsWith('review:')), []);
   assert.deepEqual(events.filter((event) => event.startsWith('post:')), []);
-  assert.deepEqual(JSON.parse(await readFile(files.stateFile, 'utf8')), {});
+  assert.deepEqual(JSON.parse(await readFile(files.stateFile, 'utf8')), initialState);
 });
 
 test('a failed requested-review search retains tracked state without admitting it', async (t) => {
@@ -1073,6 +1074,120 @@ test('a search without completeness proof cannot admit work or clean state', asy
   assert.equal(metadataCalls, 0);
   assert.deepEqual(JSON.parse(await readFile(files.stateFile, 'utf8')), initialState);
 });
+
+for (const { label, installMarker } of [
+  {
+    label: 'inherited',
+    installMarker(candidates, t) {
+      const previous = Object.getOwnPropertyDescriptor(Array.prototype, 'complete');
+      Object.defineProperty(Array.prototype, 'complete', {
+        configurable: true,
+        enumerable: false,
+        value: true,
+        writable: false,
+      });
+      t.after(() => {
+        if (previous) Object.defineProperty(Array.prototype, 'complete', previous);
+        else delete Array.prototype.complete;
+      });
+    },
+  },
+  {
+    label: 'enumerable',
+    installMarker(candidates) {
+      Object.defineProperty(candidates, 'complete', {
+        configurable: false,
+        enumerable: true,
+        value: true,
+        writable: false,
+      });
+    },
+  },
+  {
+    label: 'writable',
+    installMarker(candidates) {
+      Object.defineProperty(candidates, 'complete', {
+        configurable: false,
+        enumerable: false,
+        value: true,
+        writable: true,
+      });
+    },
+  },
+  {
+    label: 'configurable',
+    installMarker(candidates) {
+      Object.defineProperty(candidates, 'complete', {
+        configurable: true,
+        enumerable: false,
+        value: true,
+        writable: false,
+      });
+    },
+  },
+  {
+    label: 'accessor',
+    installMarker(candidates) {
+      let getterCalls = 0;
+      Object.defineProperty(candidates, 'complete', {
+        configurable: false,
+        enumerable: false,
+        get() {
+          getterCalls += 1;
+          return true;
+        },
+      });
+      return () => assert.equal(getterCalls, 0);
+    },
+  },
+]) {
+  test(`${label} completeness markers fail closed without invoking work`, async (t) => {
+    const files = await fixture(t);
+    const account = { ...work, repositories: ['owner/repo'] };
+    const retainedKey = prKey('owner/repo', 8, account);
+    const initialState = {
+      [retainedKey]: {
+        lastReviewedSha: 'sha-old',
+        lastReviewedAt: '2026-08-05T00:00:00.000Z',
+      },
+    };
+    await saveState(files.stateFile, initialState);
+
+    const candidates = [{ repo: 'owner/repo', number: 7 }];
+    const assertMarker = installMarker(candidates, t);
+    const calls = [];
+    const dependencies = successfulDependencies([]);
+    dependencies.searchReviewRequestedPRs = async () => candidates;
+    dependencies.getPullRequest = async () => {
+      calls.push('metadata');
+    };
+    dependencies.getPullRequestDiff = async () => {
+      calls.push('diff');
+    };
+    dependencies.invokeMultiPassReview = async () => {
+      calls.push('reviewer');
+    };
+    dependencies.postReview = async () => {
+      calls.push('post');
+    };
+
+    const result = await pollOnce({
+      config: config([account]),
+      ...files,
+      dependencies,
+    });
+
+    if (assertMarker) assertMarker();
+    assert.equal(result.failed, true);
+    assert.equal(result.reviewed, 0);
+    assert.deepEqual(result.outcomes, []);
+    assert.deepEqual(result.failures.map(({ note }) => note), [
+      'search completeness unproven',
+    ]);
+    assert.deepEqual(calls, []);
+    assert.deepEqual(JSON.parse(await readFile(files.stateFile, 'utf8')), initialState);
+  });
+}
 
 for (const [label, diagnostic] of [
   ['changing total_count', 'inconsistent pagination metadata'],
@@ -1235,7 +1350,7 @@ test('a foreign requested repository is rejected before metadata, review, or pos
   );
 });
 
-test('foreign requested repositories do not consume the review safety cap', async (t) => {
+test('one foreign row rejects the whole requested-review scope', async (t) => {
   const files = await fixture(t);
   const metadataRepos = [];
   const account = { ...work, repositories: ['owner/repo'] };
@@ -1265,16 +1380,15 @@ test('foreign requested repositories do not consume the review safety cap', asyn
     dependencies,
   });
 
-  assert.equal(result.reviewed, MAX_REVIEWS_PER_POLL);
+  assert.equal(result.reviewed, 0);
   assert.equal(result.failed, true);
   assert.deepEqual(result.failures.map(({ note }) => note), ['search candidate rejected']);
-  assert.equal(metadataRepos.includes('other/secret#7'), false);
-  assert.equal(metadataRepos.length, MAX_REVIEWS_PER_POLL * 3);
+  assert.deepEqual(metadataRepos, []);
 });
 
-test('malformed requested candidates are rejected while valid candidates are preserved', async (t) => {
+test('one malformed row rejects the whole requested-review scope', async (t) => {
   const files = await fixture(t);
-  const metadataNumbers = [];
+  const calls = [];
   const account = { ...work, repositories: ['owner/repo'] };
   const retainedKey = prKey('owner/repo', 8, account);
   await saveState(files.stateFile, {
@@ -1290,7 +1404,7 @@ test('malformed requested candidates are rejected while valid candidates are pre
     { repo: 'owner/repo', number: 7 },
   ]);
   dependencies.getPullRequest = async ({ number }) => {
-    metadataNumbers.push(number);
+    calls.push(`metadata:${number}`);
     return {
       headRefOid: 'sha-1',
       number,
@@ -1300,6 +1414,17 @@ test('malformed requested candidates are rejected while valid candidates are pre
       state: 'OPEN',
     };
   };
+  dependencies.getPullRequestDiff = async () => {
+    calls.push('diff');
+    return '@@ -0,0 +1 @@\n+line\n';
+  };
+  dependencies.invokeMultiPassReview = async () => {
+    calls.push('reviewer');
+    return { summary: 'reviewed', findings: [] };
+  };
+  dependencies.postReview = async () => {
+    calls.push('post');
+  };
 
   const result = await pollOnce({
     config: config([account]),
@@ -1308,19 +1433,19 @@ test('malformed requested candidates are rejected while valid candidates are pre
   });
 
   assert.equal(result.failed, true);
-  assert.equal(result.reviewed, 1);
+  assert.equal(result.reviewed, 0);
   assert.deepEqual(result.failures.map(({ note }) => note), [
     'search candidate rejected',
     'search candidate rejected',
   ]);
-  assert.deepEqual(metadataNumbers, [7, 7, 7]);
+  assert.deepEqual(calls, []);
   assert.equal(
     JSON.parse(await readFile(files.stateFile, 'utf8'))[retainedKey].lastReviewedSha,
     'sha-old',
   );
 });
 
-test('a dry run does not prune tracked state after a trustworthy empty search', async (t) => {
+test('search absence retains tracked state during a dry run', async (t) => {
   const files = await fixture(t);
   const events = [];
   const account = { ...work, repositories: ['owner/repo'] };
@@ -1406,7 +1531,7 @@ test('mixed-case existing state is recognized without reconciling or duplicating
   assert.deepEqual(Object.keys(JSON.parse(await readFile(files.stateFile, 'utf8'))), [mixedKey]);
 });
 
-test('mixed-case scoped state is pruned without metadata when requested search is empty', async (t) => {
+test('mixed-case scoped state is retained without metadata when requested search is empty', async (t) => {
   const files = await fixture(t);
   const account = { ...work, repositories: ['owner/repo'] };
   await writeFile(
@@ -1441,7 +1566,12 @@ test('mixed-case scoped state is pruned without metadata when requested search i
   assert.equal(result.reviewed, 0);
   assert.deepEqual(result.outcomes, []);
   assert.deepEqual(events.filter((event) => event.startsWith('review:')), []);
-  assert.deepEqual(JSON.parse(await readFile(files.stateFile, 'utf8')), {});
+  assert.deepEqual(JSON.parse(await readFile(files.stateFile, 'utf8')), {
+    'GITHUB.COM@WORK::OWNER/REPO#7': {
+      lastReviewedSha: 'old-sha',
+      lastReviewedAt: '2026-08-05T00:00:00.000Z',
+    },
+  });
 });
 
 test('a requested PR that closes after search is retired without review', async (t) => {
@@ -1482,7 +1612,7 @@ test('a requested PR that closes after search is retired without review', async 
   assert.deepEqual(JSON.parse(await readFile(files.stateFile, 'utf8')), {});
 });
 
-test('trusted cleanup is isolated to the searched account and repository', async (t) => {
+test('search absence retains historical state in every account and repository scope', async (t) => {
   const files = await fixture(t);
   const events = [];
   const metadataNumbers = [];
@@ -1535,6 +1665,7 @@ test('trusted cleanup is isolated to the searched account and repository', async
   assert.deepEqual(
     Object.keys(JSON.parse(await readFile(files.stateFile, 'utf8'))).sort(),
     [
+      prKey('owner/repo', 7, account),
       prKey('owner/repo', 8, personal),
       prKey('other/repo', 9, account),
       prKey('owner/repo', 10, enterprise),
@@ -1542,7 +1673,7 @@ test('trusted cleanup is isolated to the searched account and repository', async
   );
 });
 
-test('stale tracked backlog is cleaned without consuming requested candidate metadata', async (t) => {
+test('historical tracked backlog is retained without consuming requested candidate metadata', async (t) => {
   const files = await fixture(t);
   const metadataCandidates = [];
   const account = {
@@ -1591,6 +1722,10 @@ test('stale tracked backlog is cleaned without consuming requested candidate met
     result.outcomes.map(({ repo, number, status }) => ({ repo, number, status })),
     [{ repo: 'owner/new', number: 99, status: 'reviewed' }],
   );
+  const persisted = JSON.parse(await readFile(files.stateFile, 'utf8'));
+  for (const key of Object.keys(trackedState)) {
+    assert.deepEqual(persisted[key], trackedState[key]);
+  }
 });
 
 test('a changed candidate in another repository receives safety-cap capacity', async (t) => {
@@ -1904,48 +2039,61 @@ test('tracked-only backlog consumes no metadata budget or deferral capacity', as
   assert.deepEqual(firstPoll.outcomes, []);
   assert.deepEqual(firstPoll.failures, []);
   assert.deepEqual(metadataCandidates, []);
-  assert.deepEqual(JSON.parse(await readFile(files.stateFile, 'utf8')), {});
+  assert.deepEqual(JSON.parse(await readFile(files.stateFile, 'utf8')), trackedState);
 });
 
-test('failed requested-state cleanup rolls back and does not block a valid candidate', async (t) => {
+test('same-count membership churn never deletes historical state or reviews unsafe rows', async (t) => {
   const files = await fixture(t);
   const account = { ...work, repositories: ['owner/repo'] };
-  const closedKey = prKey('owner/repo', 1, account);
-  const openKey = prKey('owner/repo', 2, account);
   const trackedCursorKey = 'github.com@work::owner/repo::tracked';
-  await saveState(files.stateFile, {
-    [closedKey]: {
-      lastReviewedSha: 'old-1',
-      lastReviewedAt: '2026-08-05T00:00:00.000Z',
-    },
-    [openKey]: {
-      lastReviewedSha: 'old-2',
-      lastReviewedAt: '2026-08-05T00:00:00.000Z',
-    },
+  const requestedCursorKey = 'github.com@work::owner/repo::requested';
+  const initialState = {
     [STATE_METADATA_KEY]: {
       version: 1,
-      candidateCursors: { [trackedCursorKey]: 1 },
+      candidateCursors: {
+        [trackedCursorKey]: 1,
+        [requestedCursorKey]: 100,
+      },
     },
-  });
+  };
+  for (let number = 1; number <= 102; number += 1) {
+    initialState[prKey('owner/repo', number, account)] = {
+      lastReviewedSha: 'sha-current',
+      lastReviewedAt: '2026-08-05T00:00:00.000Z',
+    };
+  }
+  await saveState(files.stateFile, initialState);
 
   const dependencies = successfulDependencies([]);
-  dependencies.searchReviewRequestedPRs = async () => completeSearch([{
-    repo: 'owner/repo',
-    number: 2,
-  }]);
-  dependencies.getPullRequest = async ({ number }) => ({
-    headRefOid: `new-${number}`,
-    number,
-    title: `PR ${number}`,
-    url: `https://github.com/owner/repo/pull/${number}`,
-    body: '',
-    state: 'OPEN',
-  });
-  let saveCalls = 0;
-  dependencies.saveState = async (...args) => {
-    saveCalls += 1;
-    if (saveCalls === 1) throw new Error('disk full');
-    return saveState(...args);
+  // Model page one returning 1..100 and page two returning 102 while both
+  // pages report total_count 101. PR 101 is absent despite the stable count.
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([
+    ...Array.from({ length: 100 }, (_, index) => ({
+      repo: 'owner/repo',
+      number: index + 1,
+    })),
+    { repo: 'owner/repo', number: 102 },
+  ]);
+  const metadataNumbers = [];
+  dependencies.getPullRequest = async ({ number }) => {
+    metadataNumbers.push(number);
+    return {
+      headRefOid: 'sha-current',
+      number,
+      title: `PR ${number}`,
+      url: `https://github.com/owner/repo/pull/${number}`,
+      body: '',
+      state: 'OPEN',
+    };
+  };
+  let reviewerCalls = 0;
+  let postCalls = 0;
+  dependencies.invokeMultiPassReview = async () => {
+    reviewerCalls += 1;
+    return { summary: 'must not review', findings: [] };
+  };
+  dependencies.postReview = async () => {
+    postCalls += 1;
   };
 
   const result = await pollOnce({
@@ -1954,25 +2102,26 @@ test('failed requested-state cleanup rolls back and does not block a valid candi
     dependencies,
   });
 
-  assert.equal(result.failed, true);
-  assert.equal(result.reviewed, 1);
-  assert.deepEqual(
-    result.failures.map(({ subject, note }) => ({ subject, note })),
-    [{
-      subject: 'owner/repo',
-      note: 'review request state cleanup failed',
-    }],
-  );
+  assert.equal(result.failed, false);
+  assert.equal(result.reviewed, 0);
+  assert.equal(reviewerCalls, 0);
+  assert.equal(postCalls, 0);
+  assert.equal(metadataNumbers.includes(101), false);
+  assert.equal(metadataNumbers[0], 102);
   const persisted = JSON.parse(await readFile(files.stateFile, 'utf8'));
-  assert.equal(persisted[closedKey].lastReviewedSha, 'old-1');
-  assert.equal(persisted[openKey].lastReviewedSha, 'new-2');
+  for (let number = 1; number <= 102; number += 1) {
+    assert.deepEqual(
+      persisted[prKey('owner/repo', number, account)],
+      initialState[prKey('owner/repo', number, account)],
+    );
+  }
   assert.equal(
     persisted[STATE_METADATA_KEY].candidateCursors[trackedCursorKey],
     1,
   );
 });
 
-test('failed requested-state cleanup preserves a mixed-case state file without metadata reads', async (t) => {
+test('empty requested search performs no state write and preserves mixed-case history', async (t) => {
   const files = await fixture(t);
   const account = { ...work, repositories: ['owner/repo'] };
   const mixedKey = 'GITHUB.COM@WORK::OWNER/REPO#1';
@@ -1991,8 +2140,10 @@ test('failed requested-state cleanup preserves a mixed-case state file without m
     metadataCalls += 1;
     throw new Error('tracked-only state must not reach metadata');
   };
+  let saveCalls = 0;
   dependencies.saveState = async () => {
-    throw new Error('disk full');
+    saveCalls += 1;
+    throw new Error('an empty search must not save state');
   };
 
   const result = await pollOnce({
@@ -2001,15 +2152,10 @@ test('failed requested-state cleanup preserves a mixed-case state file without m
     dependencies,
   });
 
-  assert.equal(result.failed, true);
-  assert.deepEqual(
-    result.failures.map(({ subject, note }) => ({ subject, note })),
-    [{
-      subject: 'owner/repo',
-      note: 'review request state cleanup failed',
-    }],
-  );
+  assert.equal(result.failed, false);
+  assert.deepEqual(result.failures, []);
   assert.equal(metadataCalls, 0);
+  assert.equal(saveCalls, 0);
   assert.deepEqual(JSON.parse(await readFile(files.stateFile, 'utf8')), initialState);
 });
 
@@ -3018,62 +3164,6 @@ test('a posted review is reconciled after state persistence fails without repost
   const state = JSON.parse(await readFile(files.stateFile, 'utf8'));
   assert.equal(
     state['github.com@work::owner/repo#7'].lastReviewedSha,
-    'sha-1',
-  );
-});
-
-test('a fresh request repairs marker state after trusted cleanup prunes it', async (t) => {
-  const files = await fixture(t);
-  const key = prKey('owner/repo', 7, work);
-  await saveState(files.stateFile, {
-    [key]: {
-      lastReviewedSha: 'sha-1',
-      lastReviewedAt: '2026-08-05T00:00:00.000Z',
-    },
-  });
-
-  let requestActive = false;
-  let reviewerCalls = 0;
-  let postCalls = 0;
-  const dependencies = successfulDependencies([]);
-  dependencies.searchReviewRequestedPRs = async ({ repo }) => completeSearch(
-    requestActive ? [{ repo, number: 7 }] : [],
-  );
-  dependencies.reviewAlreadyPosted = async () => true;
-  dependencies.invokeMultiPassReview = async () => {
-    reviewerCalls += 1;
-    return { summary: 'must not be generated', findings: [] };
-  };
-  dependencies.postReview = async () => {
-    postCalls += 1;
-  };
-
-  const cleanup = await pollOnce({
-    config: config([work]),
-    ...files,
-    dependencies,
-  });
-  assert.deepEqual(cleanup, {
-    failed: false,
-    reviewed: 0,
-    outcomes: [],
-    failures: [],
-  });
-  assert.deepEqual(JSON.parse(await readFile(files.stateFile, 'utf8')), {});
-
-  requestActive = true;
-  const recovery = await pollOnce({
-    config: config([work]),
-    ...files,
-    dependencies,
-  });
-  assert.equal(recovery.failed, false);
-  assert.equal(recovery.reviewed, 1);
-  assert.equal(recovery.outcomes[0].status, 'recovered');
-  assert.equal(reviewerCalls, 0);
-  assert.equal(postCalls, 0);
-  assert.equal(
-    JSON.parse(await readFile(files.stateFile, 'utf8'))[key].lastReviewedSha,
     'sha-1',
   );
 });

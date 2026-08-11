@@ -12,7 +12,6 @@ import {
   normalizeState,
   prKey,
   recordCandidateCursor,
-  reconcileRequestedReviewState,
   reviewerKey,
   saveState,
   STATE_METADATA_KEY,
@@ -72,53 +71,6 @@ test('candidate scheduling cursors round-trip independently from review entries'
     candidateCursors: { [cursorKey]: 25 },
   });
   assert.equal(loaded[prKey('owner/repo', 7, reviewer)].lastReviewedSha, 'sha-7');
-});
-
-test('requested-review reconciliation prunes only absent scoped entries and the obsolete tracked cursor', () => {
-  const otherReviewer = { hostname: 'github.com', username: 'another-reviewer' };
-  const retainedKey = prKey('owner/repo', 7, reviewer);
-  const removedKey = prKey('owner/repo', 8, reviewer);
-  const otherRepoKey = prKey('owner/other', 8, reviewer);
-  const otherReviewerKey = prKey('owner/repo', 8, otherReviewer);
-  const requestedCursor = 'github.com@octocat::owner/repo::requested';
-  const trackedCursor = 'github.com@octocat::owner/repo::tracked';
-  const otherTrackedCursor = 'github.com@octocat::owner/other::tracked';
-  const entry = {
-    lastReviewedSha: 'sha',
-    lastReviewedAt: '2026-07-25T00:00:00.000Z',
-  };
-  const state = {
-    [retainedKey]: entry,
-    [removedKey]: entry,
-    [otherRepoKey]: entry,
-    [otherReviewerKey]: entry,
-    'owner/repo#9': entry,
-  };
-  recordCandidateCursor(state, requestedCursor, 2);
-  recordCandidateCursor(state, trackedCursor, 3);
-  recordCandidateCursor(state, otherTrackedCursor, 4);
-
-  assert.equal(reconcileRequestedReviewState(state, {
-    reviewer,
-    repo: 'OWNER/REPO',
-    requestedNumbers: [7],
-  }), true);
-  assert.deepEqual(Object.keys(state).sort(), [
-    STATE_METADATA_KEY,
-    otherReviewerKey,
-    otherRepoKey,
-    'owner/repo#9',
-    retainedKey,
-  ].sort());
-  assert.deepEqual(state[STATE_METADATA_KEY].candidateCursors, {
-    [requestedCursor]: 2,
-    [otherTrackedCursor]: 4,
-  });
-  assert.equal(reconcileRequestedReviewState(state, {
-    reviewer,
-    repo: 'owner/repo',
-    requestedNumbers: [7],
-  }), false);
 });
 
 test('malformed candidate scheduling metadata fails closed', async (t) => {

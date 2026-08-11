@@ -98,7 +98,7 @@ test('explicit repository search preserves concatenated paginated gh output', as
         Buffer.from(
           'meta|2|false\n' +
           'https://api.github.com/repos/acme/first|7\n' +
-          'https://api.github.com/repos/acme/second|8\n',
+          'https://api.github.com/repos/acme/first|8\n',
         ),
       );
       child.emit('close', 0);
@@ -112,9 +112,14 @@ test('explicit repository search preserves concatenated paginated gh output', as
   });
   assert.deepEqual(results, [
     { repo: 'acme/first', number: 7 },
-    { repo: 'acme/second', number: 8 },
+    { repo: 'acme/first', number: 8 },
   ]);
-  assert.equal(results.complete, true);
+  assert.deepEqual(Object.getOwnPropertyDescriptor(results, 'complete'), {
+    configurable: false,
+    enumerable: false,
+    value: true,
+    writable: false,
+  });
 
   assert.equal(command, 'gh');
   assert.equal(spawnCount, 1);
@@ -124,62 +129,16 @@ test('explicit repository search preserves concatenated paginated gh output', as
   assert.ok(args.some((arg) => arg.includes('.repository_url')));
 });
 
-test('capped review-requested search falls back to the repository pull list', async (t) => {
-  const calls = [];
-  const fallbackPage = [
-    { number: 2001, requested_reviewers: [{ login: 'OCTOCAT' }] },
-    { number: 2002, requested_reviewers: [{ login: 'other-user' }] },
-  ];
-  t.mock.method(childProcess, 'spawn', (_spawnCommand, spawnArgs) => {
-    calls.push(spawnArgs);
-    const child = new EventEmitter();
-    child.stdout = new EventEmitter();
-    child.stderr = new EventEmitter();
-    child.stdin = {
-      write() {},
-      end() {},
-    };
-    process.nextTick(() => {
-      if (spawnArgs.includes('/search/issues')) {
-        child.stdout.emit(
-          'data',
-          Buffer.from(
-            'meta|1001|false\n' +
-            'https://api.github.com/repos/acme/repo|1\n',
-          ),
-        );
-      } else {
-        // gh applies --jq to each array-shaped page before returning stdout.
-        const fallbackNumbers = fallbackPage
-          .filter((pullRequest) => pullRequest.requested_reviewers.some(
-            (reviewer) => reviewer.login.toLowerCase() === 'octocat',
-          ))
-          .map((pullRequest) => String(pullRequest.number));
-        child.stdout.emit('data', Buffer.from(`${fallbackNumbers.join('\n')}\n`));
-      }
-      child.emit('close', 0);
-    });
-    return child;
-  });
+test('capped review-requested search fails closed without a fallback', async (t) => {
+  const spawnCount = mockGhStdout(t, [
+    'meta|1001|false\nhttps://api.github.com/repos/acme/repo|1\n',
+  ]);
 
-  const results = await searchReviewRequestedPRs({
-    username: 'octocat',
-    repo: 'acme/repo',
-  });
-
-  assert.deepEqual(results, [{ repo: 'acme/repo', number: 2001 }]);
-  assert.equal(results.complete, true);
-  assert.equal(calls.length, 2);
-  assert.ok(calls[1].includes('--paginate'));
-  assert.ok(calls[1].includes('--method'));
-  assert.ok(calls[1].includes('GET'));
-  assert.ok(calls[1].includes('/repos/acme/repo/pulls'));
-  assert.ok(calls[1].includes('state=open'));
-  const fallbackJq = calls[1][calls[1].indexOf('--jq') + 1];
-  assert.equal(
-    fallbackJq,
-    '.[] | select(any(.requested_reviewers[]?; (.login // "") | ascii_downcase == "octocat")) | (.number | tostring)',
+  await assert.rejects(
+    searchReviewRequestedPRs({ username: 'octocat', repo: 'acme/repo' }),
+    /did not provide a complete result set/u,
   );
+  assert.equal(spawnCount(), 1);
 });
 
 test('complete multi-page review-requested search proves every result', async (t) => {
@@ -244,6 +203,13 @@ for (const { label, output, error } of [
     error: /malformed result metadata/u,
   },
   {
+    label: 'foreign repository candidates',
+    output:
+      'meta|1|false\n' +
+      'https://api.github.com/repos/acme/other|7\n',
+    error: /foreign pull request candidate/u,
+  },
+  {
     label: 'duplicate candidates',
     output:
       'meta|2|false\n' +
@@ -276,20 +242,16 @@ for (const { label, output, error } of [
   });
 }
 
-test('incomplete search metadata uses only the complete repository fallback', async (t) => {
+test('incomplete search metadata fails closed without a fallback', async (t) => {
   const spawnCount = mockGhStdout(t, [
     'meta|2|true\nhttps://api.github.com/repos/acme/repo|7\n',
-    '8\n',
   ]);
 
-  const results = await searchReviewRequestedPRs({
-    username: 'octocat',
-    repo: 'acme/repo',
-  });
-
-  assert.deepEqual(results, [{ repo: 'acme/repo', number: 8 }]);
-  assert.equal(results.complete, true);
-  assert.equal(spawnCount(), 2);
+  await assert.rejects(
+    searchReviewRequestedPRs({ username: 'octocat', repo: 'acme/repo' }),
+    /did not provide a complete result set/u,
+  );
+  assert.equal(spawnCount(), 1);
 });
 
 test('pull request metadata includes the current state', async (t) => {

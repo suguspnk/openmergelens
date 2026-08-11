@@ -5,9 +5,10 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 - Fixed review scheduling so only pull requests with a current, validated
-  GitHub review request enter the queue; trustworthy searches also retire stale
-  state without risking cross-account or cross-repository cleanup. Pagination
-  metadata and candidate counts must prove complete before either action.
+  GitHub review request enter the queue. Pagination metadata and candidate
+  counts must prove complete, and incomplete, capped, malformed, or foreign
+  discovery fails the repository scope closed. Search absence never deletes
+  historical review state or scheduling cursors.
 
 ## [1.5.1] - 2026-08-10
 
