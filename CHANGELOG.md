@@ -4,6 +4,8 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-08-12
+
 - Fixed review scheduling so only pull requests with a current, validated
   GitHub review request enter the queue. Pagination metadata and candidate
   counts must prove complete, and incomplete, capped, malformed, or foreign
@@ -45,6 +47,9 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
   future timestamps, and marker-version proof; moved exact UTF-8 entry/byte
   reservations before diff and AI work; and added deterministic soft-share
   compaction that never evicts current, reserved, unscoped, or unproven state.
+- Partitioned the heaviest state and poller regression files under the same
+  bounded test timeout so supported CI runners retain complete coverage without
+  cancelling slower file aggregates.
 
 ## [1.5.1] - 2026-08-10
 
