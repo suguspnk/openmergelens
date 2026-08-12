@@ -271,3 +271,151 @@ test('failed new-key reservations leave safety capacity for an existing-key re-r
     MAX_REVIEW_STATE_ENTRIES,
   );
 });
+
+test('concurrent failed reservations do not transiently defer an existing-key re-review', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-poller-capacity-race-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const unavailable = {
+    hostname: 'github.com',
+    username: 'retired',
+    repositories: ['owner/unavailable'],
+  };
+  const selected = {
+    hostname: 'github.com',
+    username: 'work',
+    repositories: ['owner/selected'],
+  };
+  const existingNumbers = Array.from({ length: 19 }, (_, index) => index + 1);
+  const state = Object.fromEntries([
+    ...Array.from(
+      { length: MAX_REVIEW_STATE_ENTRIES - existingNumbers.length },
+      (_, index) => [
+        prKey('owner/unavailable', index + 1, unavailable),
+        {
+          lastReviewedSha: `old-unavailable-${index + 1}`,
+          lastReviewedAt: '2026-08-05T00:00:00.000Z',
+        },
+      ],
+    ),
+    ...existingNumbers.map((number) => [
+      prKey('owner/selected', number, selected),
+      {
+        lastReviewedSha: `old-selected-${number}`,
+        lastReviewedAt: '2026-08-05T00:00:00.000Z',
+      },
+    ]),
+  ]);
+  const failedNewNumbers = [20, 21];
+  const targetNumber = 19;
+  const candidates = [
+    ...existingNumbers.slice(0, -1).map((number) => ({
+      repo: 'owner/selected',
+      number,
+    })),
+    ...failedNewNumbers.map((number) => ({ repo: 'owner/selected', number })),
+    { repo: 'owner/selected', number: targetNumber },
+  ];
+  const reviewed = [];
+  const posted = [];
+  let persistedState;
+  const dependencies = {
+    createGitHubMutationQueue: () => ({
+      run: async (operation) => operation(),
+    }),
+    createGitHubMutationCadence: () => ({
+      run: async (operation, { beforeStart } = {}) => {
+        if (beforeStart) await beforeStart();
+        return operation();
+      },
+    }),
+    resolveGitHubAuth: async () => ({ username: selected.username }),
+    currentUsername: async ({ auth }) => auth.username,
+    isValidatedReviewRequestSearchResult: (results) =>
+      validatedSearchResults.has(results),
+    searchReviewRequestedPRs: async () => completeSearch(candidates),
+    getPullRequest: async ({ repo, number }) => ({
+      headRefOid: `new-sha-${number}`,
+      number,
+      title: `PR ${number}`,
+      url: `https://github.com/${repo}/pull/${number}`,
+      body: '',
+      state: 'OPEN',
+    }),
+    getPullRequestForStateGc: async ({ repo, number }) => ({
+      headRefOid: `new-sha-${number}`,
+      number,
+      title: `PR ${number}`,
+      url: `https://github.com/${repo}/pull/${number}`,
+      body: '',
+      state: 'OPEN',
+    }),
+    getPullRequestDiff: async () => '@@ -0,0 +1 @@\n+line\n',
+    hasActiveReviewRequest: async () => true,
+    reviewAlreadyPosted: async () => false,
+    ensureReviewPrompt: async () => '/virtual/prompt.md',
+    readPrompt: async () => '{{diff}}',
+    readLearnings: async () => '',
+    invokeMultiPassReview: async ({ pr }) => {
+      reviewed.push(pr.number);
+      return { summary: 'reviewed', findings: [] };
+    },
+    postReview: async ({ number, scheduleMutation }) =>
+      scheduleMutation(async () => { posted.push(number); }),
+    loadState: async () => state,
+    saveState: async (_stateFile, nextState) => {
+      persistedState = structuredClone(nextState);
+    },
+  };
+  const silentLogger = {
+    child() { return this; },
+    info() {},
+    warn() {},
+    error() {},
+    output() {},
+  };
+  const config = {
+    configVersion: 5,
+    githubAccounts: [selected],
+    aiProcessingConsent: createAiProcessingConsent('reviewer', [selected]),
+    reviewerCommand: 'reviewer',
+    model: null,
+    reviewerInputMode: 'stdin',
+    reviewBatchSize: 3,
+    reviewFocusCount: 1,
+    stateFile: './state.json',
+  };
+
+  const result = await pollOnce({
+    config,
+    stateFile: path.join(root, 'state.json'),
+    logPath: path.join(root, 'poll.log'),
+    defaultReviewPromptPath: path.join(root, 'template.md'),
+    logger: silentLogger,
+    dependencies,
+  });
+
+  assert.equal(result.failed, true);
+  assert.equal(result.reviewed, existingNumbers.length);
+  assert.equal(
+    result.failures.filter(({ note }) => note === 'review state capacity reached').length,
+    failedNewNumbers.length,
+  );
+  assert.equal(
+    result.failures.some(({ subject }) => subject === 'review queue'),
+    false,
+  );
+  assert.deepEqual(reviewed, existingNumbers);
+  assert.deepEqual(posted, existingNumbers);
+  assert.equal(
+    result.outcomes.find(({ number }) => number === targetNumber)?.status,
+    're-reviewed',
+  );
+  assert.equal(
+    persistedState[prKey('owner/selected', targetNumber, selected)].lastReviewedSha,
+    `new-sha-${targetNumber}`,
+  );
+  assert.equal(
+    Object.keys(persistedState).filter((key) => key !== STATE_METADATA_KEY).length,
+    MAX_REVIEW_STATE_ENTRIES,
+  );
+});
