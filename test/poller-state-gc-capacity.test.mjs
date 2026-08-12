@@ -612,6 +612,65 @@ test('legacy repair deadline bounds authentication and ignores unrelated account
   assert.equal(calls.some((call) => call.username === 'other'), false);
 });
 
+test('legacy repair rotates authenticated account batches after deadline exhaustion', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-upgrade-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const stateFile = path.join(root, 'state.json');
+  const migrationAccounts = Array.from({ length: 6 }, (_, index) => ({
+    hostname: 'github.com',
+    username: `work-${index + 1}`,
+    repositories: [`owner/repo-${index + 1}`],
+  }));
+  const entriesPerAccount = [1_667, 1_667, 1_667, 1_667, 1_667, 1_666];
+  const state = {};
+  for (const [accountIndex, candidateAccount] of migrationAccounts.entries()) {
+    for (let index = 0; index < entriesPerAccount[accountIndex]; index += 1) {
+      state[prKey(
+        candidateAccount.repositories[0],
+        index + 1,
+        candidateAccount,
+      )] = {
+        lastReviewedSha: `sha-${accountIndex + 1}-${index + 1}`,
+        lastReviewedAt: '2026-08-11T00:00:00.000Z',
+      };
+    }
+  }
+  await writeFile(stateFile, JSON.stringify(state));
+  const authenticatedUsernames = [];
+  let clockCalls = 0;
+  const dependencies = migrationDependencies();
+  dependencies.monotonicNow = () => {
+    clockCalls += 1;
+    return clockCalls <= 7 ? 0 : 15_000;
+  };
+  dependencies.resolveGitHubAuth = async (candidateAccount) => {
+    authenticatedUsernames.push(candidateAccount.username);
+    throw new Error('simulated authentication timeout');
+  };
+  const options = migrationPollOptions(root, dependencies);
+  options.config.githubAccounts = migrationAccounts;
+  options.config.aiProcessingConsent = createAiProcessingConsent(
+    'reviewer',
+    migrationAccounts,
+  );
+
+  const first = await pollOnce(options);
+  assert.equal(first.failed, true);
+  assert.deepEqual(authenticatedUsernames, [
+    'work-1',
+    'work-2',
+    'work-3',
+    'work-4',
+    'work-5',
+  ]);
+
+  authenticatedUsernames.length = 0;
+  clockCalls = 0;
+  const second = await pollOnce(options);
+  assert.equal(second.failed, true);
+  assert.equal(authenticatedUsernames[0], 'work-6');
+});
+
 test('legacy over-cap repair stops at its wall-clock deadline', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-upgrade-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -622,8 +681,8 @@ test('legacy over-cap repair stops at its wall-clock deadline', async (t) => {
   let migrationClockCalls = 0;
   dependencies.monotonicNow = () => {
     migrationClockCalls += 1;
-    if (migrationClockCalls <= 4) return 0;
-    if (migrationClockCalls === 5) return 14_999;
+    if (migrationClockCalls <= 5) return 0;
+    if (migrationClockCalls === 6) return 14_999;
     return 15_000;
   };
   dependencies.getPullRequestForStateGc = async ({ number, timeoutMs }) => {

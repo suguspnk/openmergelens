@@ -26,6 +26,9 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
 - Made successful state replacement crash-durable by flushing its parent
   directory, with explicit post-commit warning semantics, while retaining
   existing absolute paths in owner-controlled non-writable POSIX directories.
+- Rebound the parent and committed file after the final rename, reported
+  unsupported Windows directory flushes as unconfirmed durability, and rotated
+  deadline-exhausted legacy authentication batches fairly across polls.
 - Accepted valid human and unrelated `[bot]` requested-reviewer actors while
   failing malformed or mistyped actor rows closed. Hardened state canonicality,
   future timestamps, and marker-version proof; moved exact UTF-8 entry/byte

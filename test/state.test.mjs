@@ -18,6 +18,7 @@ import path from 'node:path';
 import {
   candidateCursorFor,
   expireReviewState,
+  flushStateDirectoryHandle,
   loadState,
   MAX_LEGACY_STATE_FILE_BYTES,
   migrateLegacyStateForReviewer,
@@ -1059,6 +1060,30 @@ test('parent flush failure reports committed state without rollback', async (t) 
   assert.deepEqual(await readdir(directory), ['state.json']);
 });
 
+test('unsupported Windows parent flush is reported as committed but not durable', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const warnings = [];
+  const unsupported = Object.assign(new Error('invalid directory handle'), {
+    code: 'EINVAL',
+  });
+
+  const result = await saveState(stateFile, {}, {
+    flushParentHandle: (handle) => flushStateDirectoryHandle(handle, {
+      platform: 'win32',
+      syncHandle: async () => { throw unsupported; },
+    }),
+    onPostCommitError: async (err) => { warnings.push(err.message); },
+  });
+
+  assert.equal(result.committed, true);
+  assert.equal(result.directorySynced, false);
+  assert.match(result.postCommitError.message, /unsupported on this Windows filesystem/u);
+  assert.equal(warnings.length, 1);
+  assert.deepEqual(await loadState(stateFile), {});
+});
+
 test('temporary cleanup failure is surfaced without deleting the previous state', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -1132,6 +1157,51 @@ test('parent replacement after verification cannot redirect commit or cleanup', 
   await rm(directory, { recursive: true, force: true });
   await rename(movedDirectory, directory);
   assert.deepEqual(await loadState(stateFile), initialState);
+});
+
+test('parent swap at the final rename boundary cannot report attacker content committed', {
+  skip: process.platform === 'win32',
+}, async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-boundary-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const directory = path.join(root, 'private');
+  const movedDirectory = path.join(root, 'private-moved');
+  await mkdir(directory, { mode: 0o700 });
+  const stateFile = path.join(directory, 'state.json');
+  const initialState = {
+    [prKey('owner/repo', 1, reviewer)]: {
+      lastReviewedSha: 'old-sha',
+      lastReviewedAt: '2026-07-28T00:00:00.000Z',
+    },
+  };
+  await saveState(stateFile, initialState);
+  const originalBytes = await readFile(stateFile, 'utf8');
+
+  await assert.rejects(
+    saveState(stateFile, {}, {
+      beforeCommitRename: async (temporaryPath) => {
+        await rename(directory, movedDirectory);
+        await mkdir(directory, { mode: 0o700 });
+        await writeFile(stateFile, 'attacker-old\n', { mode: 0o600 });
+        await writeFile(
+          path.join(directory, path.basename(temporaryPath)),
+          'attacker-new\n',
+          { mode: 0o600 },
+        );
+      },
+    }),
+    /parent directory identity changed|could not be bound/u,
+  );
+
+  assert.equal(await readFile(stateFile, 'utf8'), 'attacker-new\n');
+  assert.equal(
+    await readFile(path.join(movedDirectory, 'state.json'), 'utf8'),
+    originalBytes,
+  );
+  assert.equal(
+    (await readdir(movedDirectory)).some((name) => name.includes('.tmp-')),
+    true,
+  );
 });
 
 test('saving rejects an unsafe existing parent without tightening it', {

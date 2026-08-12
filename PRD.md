@@ -482,13 +482,18 @@ parents still fail closed. Reads validate that parent and a user-owned regular,
 non-symlink state file through held handles, and permission hardening uses the
 verified file handle before parsing. Writes retain handles for the directory and
 private temporary file, revalidate both identities, then perform one atomic
-temporary-to-target replacement as the commit operation. The prior target is
+temporary-to-target replacement as the commit operation. Because Node does not
+expose descriptor-relative rename, the writer treats that rename as provisional
+until the configured parent and committed target are rebound to the held parent
+and temporary-file identities; a final-boundary parent swap fails closed. The prior target is
 never moved aside first, so a failed pre-commit step leaves it in place; unsafe
 temporary cleanup is surfaced instead of deleting through a replaced parent.
 The writer flushes replacement bytes before rename and the held parent directory
 after rename. A parent-directory flush failure is explicitly post-commit: it is
 reported as a durability warning while retaining the committed in-memory and
-on-disk state instead of pretending rollback occurred.
+on-disk state instead of pretending rollback occurred. Filesystems where
+Windows directory flush is unsupported use the same committed-but-not-confirmed
+warning status rather than claiming crash durability.
 
 One legacy file containing more than 10,000 otherwise valid records can upgrade
 through deterministic 365-day expiry plus at most 1,000 authenticated PR-state
@@ -499,6 +504,9 @@ Authentication is scheduled in bounded batches only while the same end-to-end
 repair deadline remains live. Confirmed-deletion capacity is projected with
 incremental exact entry and UTF-8 byte accounting rather than repeatedly
 serializing the full legacy state.
+If authentication consumes the deadline, all records for that attempted account
+batch move byte-neutrally behind the remaining reviewer scopes before the
+progress save, so a later account leads the next poll.
 An unsuccessful window is rotated byte-neutrally in the existing entry order so
 later windows are eventually inspected. Confirmed `CLOSED` or `MERGED` records
 accumulate across those atomic progress saves; other records are never pruned.
