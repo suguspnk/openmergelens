@@ -23,6 +23,9 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
 - Hardened state reads and atomic replacement against symlink, shared-parent,
   parent-replacement, and cleanup races. Legacy over-cap repair now applies one
   end-to-end deadline and incrementally projects confirmed closure reclamation.
+- Made successful state replacement crash-durable by flushing its parent
+  directory, with explicit post-commit warning semantics, while retaining
+  existing absolute paths in owner-controlled non-writable POSIX directories.
 - Accepted valid human and unrelated `[bot]` requested-reviewer actors while
   failing malformed or mistyped actor rows closed. Hardened state canonicality,
   future timestamps, and marker-version proof; moved exact UTF-8 entry/byte

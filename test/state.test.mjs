@@ -560,7 +560,7 @@ test('loading a symlink state never reads or chmods its target', {
   assert.equal((await lstat(stateFile)).isSymbolicLink(), true);
 });
 
-test('loading state from a shared parent fails before touching the file', {
+test('loading state from an owner-controlled conventional parent remains compatible', {
   skip: process.platform === 'win32',
 }, async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
@@ -570,13 +570,8 @@ test('loading state from a shared parent fails before touching the file', {
   await chmod(stateFile, 0o644);
   await chmod(directory, 0o755);
 
-  await assert.rejects(
-    loadState(stateFile),
-    /parent directory must be private and user-owned/u,
-  );
-
-  assert.equal(await readFile(stateFile, 'utf8'), '{}\n');
-  assert.equal((await stat(stateFile)).mode & 0o777, 0o644);
+  assert.deepEqual(await loadState(stateFile), {});
+  assert.equal((await stat(stateFile)).mode & 0o777, 0o600);
 });
 
 test('parent replacement while loading fails closed instead of returning empty state', {
@@ -1007,6 +1002,63 @@ test('temporary flush failure leaves the previous state committed', async (t) =>
   assert.deepEqual(await readdir(directory), ['state.json']);
 });
 
+test('state commit flushes bytes then rename then parent directory', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const events = [];
+
+  const result = await saveState(stateFile, {}, {
+    flushHandle: async (handle) => {
+      events.push('temp-sync');
+      await handle.sync();
+    },
+    commitRename: async (...args) => {
+      events.push('rename');
+      await rename(...args);
+    },
+    flushParentHandle: async (handle) => {
+      events.push('parent-sync');
+      await handle.sync();
+    },
+  });
+
+  assert.deepEqual(events, ['temp-sync', 'rename', 'parent-sync']);
+  assert.deepEqual(result, { committed: true, directorySynced: true });
+  assert.deepEqual(await loadState(stateFile), {});
+});
+
+test('parent flush failure reports committed state without rollback', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  await saveState(stateFile, {
+    [prKey('owner/repo', 1, reviewer)]: {
+      lastReviewedSha: 'old-sha',
+      lastReviewedAt: '2026-07-28T00:00:00.000Z',
+    },
+  });
+  const replacement = {
+    [prKey('owner/repo', 1, reviewer)]: {
+      lastReviewedSha: 'new-sha',
+      lastReviewedAt: '2026-07-28T01:00:00.000Z',
+    },
+  };
+  const warnings = [];
+
+  const result = await saveState(stateFile, replacement, {
+    flushParentHandle: async () => { throw new Error('directory fsync failed'); },
+    onPostCommitError: async (err) => { warnings.push(err.message); },
+  });
+
+  assert.equal(result.committed, true);
+  assert.equal(result.directorySynced, false);
+  assert.match(result.postCommitError.message, /directory fsync failed/u);
+  assert.deepEqual(warnings, ['directory fsync failed']);
+  assert.deepEqual(await loadState(stateFile), replacement);
+  assert.deepEqual(await readdir(directory), ['state.json']);
+});
+
 test('temporary cleanup failure is surfaced without deleting the previous state', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -1087,14 +1139,42 @@ test('saving rejects an unsafe existing parent without tightening it', {
 }, async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-shared-state-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  await chmod(root, 0o755);
+  await chmod(root, 0o775);
 
   const stateFile = path.join(root, 'state.json');
   await assert.rejects(
     saveState(stateFile, {}),
-    /parent directory must be private and user-owned/u,
+    /parent directory must be user-owned and not group\/other-writable/u,
   );
 
-  assert.equal((await stat(root)).mode & 0o777, 0o755);
+  assert.equal((await stat(root)).mode & 0o777, 0o775);
   await assert.rejects(stat(stateFile), { code: 'ENOENT' });
+});
+
+test('absolute state path under a conventional parent preserves atomic rollback', {
+  skip: process.platform === 'win32',
+}, async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-absolute-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await chmod(directory, 0o755);
+  const stateFile = path.resolve(directory, 'state.json');
+  const initial = {
+    [prKey('owner/repo', 1, reviewer)]: {
+      lastReviewedSha: 'old-sha',
+      lastReviewedAt: '2026-07-28T00:00:00.000Z',
+    },
+  };
+  await saveState(stateFile, initial);
+  const originalBytes = await readFile(stateFile, 'utf8');
+
+  await assert.rejects(
+    saveState(stateFile, {}, {
+      commitRename: async () => { throw new Error('absolute commit failed'); },
+    }),
+    /absolute commit failed/u,
+  );
+
+  assert.equal(await readFile(stateFile, 'utf8'), originalBytes);
+  assert.deepEqual(await loadState(stateFile), initial);
+  assert.equal((await stat(directory)).mode & 0o777, 0o755);
 });

@@ -475,13 +475,20 @@ future, and optionally carry only `reviewMarkerVersion: 1`. Invalid state is
 left untouched and fails before authentication or GitHub work.
 
 Atomic state replacement requires a non-symlink parent directory owned by the
-current user and private on POSIX. Reads validate that parent and a regular,
+current user and not group/other-writable on POSIX. This keeps existing absolute
+state paths under conventional owner-controlled `0755` directories compatible
+without relocating state or mutating the configured parent; writable shared
+parents still fail closed. Reads validate that parent and a user-owned regular,
 non-symlink state file through held handles, and permission hardening uses the
 verified file handle before parsing. Writes retain handles for the directory and
 private temporary file, revalidate both identities, then perform one atomic
 temporary-to-target replacement as the commit operation. The prior target is
 never moved aside first, so a failed pre-commit step leaves it in place; unsafe
 temporary cleanup is surfaced instead of deleting through a replaced parent.
+The writer flushes replacement bytes before rename and the held parent directory
+after rename. A parent-directory flush failure is explicitly post-commit: it is
+reported as a durability warning while retaining the committed in-memory and
+on-disk state instead of pretending rollback occurred.
 
 One legacy file containing more than 10,000 otherwise valid records can upgrade
 through deterministic 365-day expiry plus at most 1,000 authenticated PR-state
