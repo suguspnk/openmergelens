@@ -4000,14 +4000,17 @@ test('historical-state GC checks at most 25 keys and advances fairly from its cu
     const dependencies = successfulDependencies([]);
     dependencies.searchReviewRequestedPRs = async () => completeSearch([]);
     dependencies.getPullRequestForStateGc = async ({ repo, number }) => {
-      checked.push(prKey(repo, number, work));
+      const key = prKey(repo, number, work);
+      checked.push(key);
       return {
         headRefOid: `sha-${number}`,
         number,
         title: 'Tracked PR',
         url: `https://github.com/${repo}/pull/${number}`,
         body: '',
-        state: 'OPEN',
+        state: key === expectedKeys[MAX_STATE_GC_CHECKS_PER_POLL - 1]
+          ? 'CLOSED'
+          : 'OPEN',
       };
     };
     return pollOnce({
@@ -4025,9 +4028,10 @@ test('historical-state GC checks at most 25 keys and advances fairly from its cu
     expectedKeys.slice(0, MAX_STATE_GC_CHECKS_PER_POLL),
   );
   let state = JSON.parse(await readFile(files.stateFile, 'utf8'));
+  assert.equal(state[expectedKeys[MAX_STATE_GC_CHECKS_PER_POLL - 1]], undefined);
   assert.equal(
-    state[STATE_METADATA_KEY].reviewStateGcAfterKey,
-    expectedKeys[MAX_STATE_GC_CHECKS_PER_POLL - 1],
+    reviewStateGcAfterKey(state),
+    expectedKeys[MAX_STATE_GC_CHECKS_PER_POLL - 2],
   );
 
   const secondChecked = [];
@@ -5137,7 +5141,7 @@ test('byte-ceiling unsuccessful proofs persist one bounded queue rotation batch'
   assert.equal(result.failures[0].note, 'review state capacity reached');
   assert.equal(proofCalls, MAX_STATE_GC_CHECKS_PER_POLL - 1);
   assert.equal(closureCalls, 1);
-  assert.deepEqual(writtenBytes, [initialBytes]);
+  assert.deepEqual(writtenBytes, [initialBytes, initialBytes]);
 });
 
 test('a compacted marker entry rehydrates on the same SHA before diff or AI', async (t) => {

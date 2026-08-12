@@ -443,8 +443,10 @@ corresponding path under `OPENMERGELENS_HOME`).
 The reserved `__openmergelens` entry is optional scheduler metadata, not a
 review record. It advances bounded candidate windows independently per account,
 repository, and discovery source when one poll cannot inspect every candidate.
-Its optional `reviewStateGcAfterKey` cursor rotates the non-admitting historical
-cleanup sweep. Marker-proof work rotates review-entry order deterministically:
+Its optional `reviewStateGcAfterKey` cursor remains readable for states written
+by earlier releases. New closure-cleanup progress uses byte-neutral field order
+inside the last checked review entry, so a cursor can advance even at the file
+ceiling without adding metadata. Marker-proof work rotates review-entry order deterministically:
 each checked entry moves behind the other entries in its scope and each checked
 scope moves behind the other scopes. A poll batches all unsuccessful proof
 progress into one atomic order-only save. Reordering adds no bytes at the

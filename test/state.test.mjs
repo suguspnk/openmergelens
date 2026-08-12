@@ -14,6 +14,7 @@ import {
   prKey,
   recordCandidateCursor,
   recordReviewStateGcAfterKey,
+  recordReviewStateGcPosition,
   rotateReviewStateProofQueue,
   reviewScopeKey,
   reviewStateEntryCount,
@@ -112,6 +113,54 @@ test('review-state GC cursor round-trips additively with candidate cursors', asy
     },
     reviewStateGcAfterKey: 'github.com@octocat::owner/repo#7',
   });
+});
+
+test('review-state GC position is byte-stable and predecessor-readable', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const firstKey = prKey('owner/repo', 1, reviewer);
+  const secondKey = prKey('owner/repo', 2, reviewer);
+  const state = {
+    [firstKey]: {
+      lastReviewedSha: 'sha-1',
+      lastReviewedAt: '2026-07-25T00:00:00.000Z',
+    },
+    [secondKey]: {
+      lastReviewedSha: 'sha-2',
+      lastReviewedAt: '2026-07-25T00:00:00.000Z',
+      reviewMarkerVersion: 1,
+    },
+  };
+  recordCandidateCursor(state, 'github.com@octocat::owner/repo::requested', 4);
+  const before = serializeState(state);
+
+  recordReviewStateGcPosition(state, firstKey);
+  const afterFirst = serializeState(state);
+  assert.equal(afterFirst.serializedBytes, before.serializedBytes);
+  assert.equal(reviewStateGcAfterKey(afterFirst.normalizedState), firstKey);
+
+  recordReviewStateGcPosition(state, secondKey);
+  const afterSecond = serializeState(state);
+  assert.equal(afterSecond.serializedBytes, before.serializedBytes);
+  assert.equal(reviewStateGcAfterKey(afterSecond.normalizedState), secondKey);
+  assert.deepEqual(Object.keys(afterSecond.normalizedState[firstKey]), [
+    'lastReviewedSha',
+    'lastReviewedAt',
+  ]);
+  assert.deepEqual(Object.keys(afterSecond.normalizedState[secondKey]), [
+    'lastReviewedAt',
+    'lastReviewedSha',
+    'reviewMarkerVersion',
+  ]);
+  assert.deepEqual(
+    Object.keys(afterSecond.normalizedState[STATE_METADATA_KEY]).sort(),
+    ['candidateCursors', 'version'],
+  );
+
+  await saveState(stateFile, state);
+  const loaded = await loadState(stateFile);
+  assert.equal(reviewStateGcAfterKey(loaded), secondKey);
 });
 
 test('proof queue rotation is byte-stable and predecessor-readable', async (t) => {
