@@ -14,9 +14,13 @@ import {
   prKey,
   recordCandidateCursor,
   recordReviewStateGcAfterKey,
+  recordReviewStateProofAfterKey,
+  recordReviewStateProofAfterScope,
   reviewScopeKey,
   reviewStateEntryCount,
   reviewStateGcAfterKey,
+  reviewStateProofAfterKey,
+  reviewStateProofAfterScope,
   reviewerKey,
   saveState,
   serializeState,
@@ -96,6 +100,12 @@ test('review-state GC cursor round-trips additively with candidate cursors', asy
   const state = {};
 
   recordReviewStateGcAfterKey(state, 'github.com@octocat::owner/repo#7');
+  recordReviewStateProofAfterScope(state, 'github.com@octocat::owner/repo');
+  recordReviewStateProofAfterKey(
+    state,
+    'github.com@octocat::owner/repo',
+    'github.com@octocat::owner/repo#6',
+  );
   recordCandidateCursor(state, 'github.com@octocat::owner/repo::requested', 4);
   assert.equal(
     reviewStateGcAfterKey(state),
@@ -110,7 +120,19 @@ test('review-state GC cursor round-trips additively with candidate cursors', asy
       'github.com@octocat::owner/repo::requested': 4,
     },
     reviewStateGcAfterKey: 'github.com@octocat::owner/repo#7',
+    reviewStateProofAfterScope: 'github.com@octocat::owner/repo',
+    reviewStateProofAfterKeys: {
+      'github.com@octocat::owner/repo': 'github.com@octocat::owner/repo#6',
+    },
   });
+  assert.equal(
+    reviewStateProofAfterScope(loaded),
+    'github.com@octocat::owner/repo',
+  );
+  assert.equal(
+    reviewStateProofAfterKey(loaded, 'github.com@octocat::owner/repo'),
+    'github.com@octocat::owner/repo#6',
+  );
 });
 
 test('malformed candidate scheduling metadata fails closed', async (t) => {
@@ -148,6 +170,33 @@ test('malformed review-state GC cursors fail closed', async (t) => {
     await assert.rejects(
       loadState(stateFile),
       /review-state GC cursor is invalid/u,
+    );
+  }
+});
+
+test('malformed review-state proof cursors fail closed', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  for (const metadata of [
+    { reviewStateProofAfterScope: 'not-a-scope' },
+    { reviewStateProofAfterKeys: [] },
+    {
+      reviewStateProofAfterKeys: {
+        'github.com@octocat::owner/repo': 'github.com@octocat::other/repo#1',
+      },
+    },
+  ]) {
+    await writeFile(stateFile, JSON.stringify({
+      [STATE_METADATA_KEY]: {
+        version: 1,
+        candidateCursors: {},
+        ...metadata,
+      },
+    }));
+    await assert.rejects(
+      loadState(stateFile),
+      /review-state proof .*cursor/u,
     );
   }
 });

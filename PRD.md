@@ -435,7 +435,11 @@ corresponding path under `OPENMERGELENS_HOME`).
     "candidateCursors": {
       "github.com@antonio::owner/socialpostai-v2::requested": 25
     },
-    "reviewStateGcAfterKey": "github.com@antonio::owner/socialpostai-v2#123"
+    "reviewStateGcAfterKey": "github.com@antonio::owner/socialpostai-v2#123",
+    "reviewStateProofAfterScope": "github.com@antonio::owner/socialpostai-v2",
+    "reviewStateProofAfterKeys": {
+      "github.com@antonio::owner/socialpostai-v2": "github.com@antonio::owner/socialpostai-v2#123"
+    }
   }
 }
 ```
@@ -444,7 +448,10 @@ The reserved `__openmergelens` entry is optional scheduler metadata, not a
 review record. It advances bounded candidate windows independently per account,
 repository, and discovery source when one poll cannot inspect every candidate.
 Its optional `reviewStateGcAfterKey` cursor rotates the non-admitting historical
-cleanup sweep. Metadata remains version 1 for additive compatibility.
+cleanup sweep. Separate bounded `reviewStateProofAfterScope` and
+`reviewStateProofAfterKeys` cursors rotate marker-proof work across scopes and
+within each scope without coupling proof order to closure cleanup order.
+Metadata remains version 1 for additive compatibility.
 
 The file is read with a 16 MiB pre-parse bound and can contain at most 10,000
 review records. Scoped keys are canonical lowercase

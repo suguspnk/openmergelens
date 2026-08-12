@@ -27,6 +27,8 @@ import { MAX_CANDIDATE_METADATA_PER_POLL } from '../lib/poller.mjs';
 import {
   prKey,
   reviewStateGcAfterKey,
+  reviewStateProofAfterKey,
+  reviewStateProofAfterScope,
   saveState,
   serializeState,
   STATE_METADATA_KEY,
@@ -4876,8 +4878,14 @@ test('marker-proof cursor rolls back in memory when its atomic save fails', asyn
 
   assert.equal(result.failed, true);
   assert.equal(result.failures[0].note, 'review state capacity reached');
-  assert.ok(reviewStateGcAfterKey(savedStates[0]));
-  assert.equal(reviewStateGcAfterKey(observedLiveState), null);
+  assert.ok(reviewStateProofAfterScope(savedStates[0]));
+  assert.ok(
+    reviewStateProofAfterKey(
+      savedStates[0],
+      reviewStateProofAfterScope(savedStates[0]),
+    ),
+  );
+  assert.equal(reviewStateProofAfterScope(observedLiveState), null);
   for (const key of Object.keys(fullState)) {
     assert.ok(observedLiveState[key]);
   }
