@@ -5,6 +5,7 @@ import {
   authEnvironment,
   listAuthenticatedAccounts,
   parseAuthStatus,
+  resolveGitHubAuth,
   runGitHubAuthCommand,
 } from '../lib/github-auth.mjs';
 
@@ -61,6 +62,58 @@ test('listAuthenticatedAccounts does not infer a completed exit from a numeric e
       runCommand: async () => { throw outputLimitFailure; },
     }),
     (err) => err === outputLimitFailure,
+  );
+});
+
+test('resolveGitHubAuth preserves a sanitized abnormal token-command failure', async () => {
+  const secret = 'SENSITIVE_AUTH_BYTES_MUST_NOT_ESCAPE';
+  const terminationFailure = Object.assign(new Error(`cleanup failed: ${secret}`), {
+    code: 'ETERMINATE',
+    timeoutCode: 'ETIMEDOUT',
+    stdout: secret,
+    stderr: `token=${secret}`,
+  });
+
+  await assert.rejects(
+    resolveGitHubAuth(
+      { hostname: 'github.com', username: 'octocat', repositories: ['owner/repo'] },
+      { runCommand: async () => { throw terminationFailure; } },
+    ),
+    (err) => {
+      assert.equal(err.code, 'EGITHUBAUTHCOMMAND');
+      assert.equal(err.failureCode, 'ETERMINATE');
+      assert.equal(err.cause?.code, 'ETERMINATE');
+      assert.equal(err.cause?.timeoutCode, 'ETIMEDOUT');
+      assert.equal(err.cause?.cause, undefined);
+      assert.equal('stdout' in err, false);
+      assert.equal('stderr' in err, false);
+      assert.doesNotMatch(`${err.message}\n${err.cause?.message}`, new RegExp(secret, 'u'));
+      return true;
+    },
+  );
+});
+
+test('resolveGitHubAuth keeps a completed non-zero token exit as missing login', async () => {
+  await assert.rejects(
+    resolveGitHubAuth(
+      { hostname: 'github.com', username: 'octocat', repositories: ['owner/repo'] },
+      {
+        runCommand: async () => {
+          throw Object.assign(new Error('not logged in'), {
+            code: 1,
+            signal: null,
+            completedExit: true,
+            stdout: '',
+            stderr: 'not logged in',
+          });
+        },
+      },
+    ),
+    (err) => {
+      assert.equal(err.code, undefined);
+      assert.match(err.message, /no usable authentication/u);
+      return true;
+    },
   );
 });
 

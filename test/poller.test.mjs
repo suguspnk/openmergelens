@@ -3718,6 +3718,65 @@ test('an indeterminate committed save reloads before the next queued state write
   assert.equal(persisted[prKey('owner/repo', 8, work)].lastReviewedSha, 'sha-8');
 });
 
+test('an indeterminate save with failed reload releases reservations without re-enabling writes', async (t) => {
+  const files = await fixture(t);
+  const dependencies = successfulDependencies([]);
+  dependencies.searchReviewRequestedPRs = async ({ repo }) => completeSearch([
+    { repo, number: 7 },
+    { repo, number: 8 },
+  ]);
+  dependencies.getPullRequest = async ({ number }) => ({
+    headRefOid: `sha-${number}`,
+    number,
+    title: `PR ${number}`,
+    url: `https://github.com/owner/repo/pull/${number}`,
+    body: '',
+    state: 'OPEN',
+  });
+  dependencies.reviewAlreadyPosted = async () => true;
+
+  let loadCalls = 0;
+  dependencies.loadState = async (statePath) => {
+    loadCalls += 1;
+    if (loadCalls === 1) return loadState(statePath);
+    throw new Error('simulated strict reload failure');
+  };
+
+  let saveCalls = 0;
+  dependencies.saveState = async (statePath, nextState, options = {}) => {
+    saveCalls += 1;
+    return saveState(statePath, nextState, {
+      ...options,
+      afterCommitRename: async () => {
+        throw new Error('simulated post-rename verification failure');
+      },
+    });
+  };
+
+  const result = await pollOnce({
+    config: { ...config([work]), reviewBatchSize: 1 },
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(loadCalls, 2);
+  assert.equal(saveCalls, 1);
+  assert.equal(result.failed, true);
+  assert.equal(result.reviewed, 0);
+  assert.deepEqual(result.outcomes, []);
+  assert.deepEqual(
+    result.failures.map(({ status, number, note }) => ({ status, number, note })),
+    [
+      { status: 'failed', number: 7, note: 'tracking recovery failed' },
+      { status: 'failed', number: 8, note: 'review state capacity reached' },
+    ],
+  );
+
+  const persisted = await loadState(files.stateFile);
+  assert.equal(persisted[prKey('owner/repo', 7, work)].lastReviewedSha, 'sha-7');
+  assert.equal(persisted[prKey('owner/repo', 8, work)], undefined);
+});
+
 test('nullable unrelated history rows do not block poll rehydration', async (t) => {
   const files = await fixture(t);
   const events = [];
