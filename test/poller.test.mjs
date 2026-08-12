@@ -4960,7 +4960,7 @@ test('marker-proof cursor rolls back in memory when its atomic save fails', asyn
   assert.equal(result.failures[0].note, 'review state capacity reached');
   assert.deepEqual(
     Object.keys(savedStates[0]).filter((key) => key !== STATE_METADATA_KEY),
-    [...Object.keys(fullState).slice(1), Object.keys(fullState)[0]],
+    [...Object.keys(fullState).slice(24), ...Object.keys(fullState).slice(0, 24)],
   );
   assert.deepEqual(
     Object.keys(observedLiveState).filter((key) => key !== STATE_METADATA_KEY),
@@ -5070,6 +5070,74 @@ test('byte-ceiling proof rotation reaches an exact victim without metadata growt
   assert.equal(persistedState[prKey(donorRepo, 1, donor)], undefined);
   assert.equal(persistedState[prKey('o/r', 1, target)].lastReviewedSha, 'target-sha');
   assert.ok(serializeState(persistedState).serializedBytes <= MAX_STATE_FILE_BYTES);
+});
+
+test('byte-ceiling unsuccessful proofs persist one bounded queue rotation batch', async (t) => {
+  const files = await fixture(t);
+  const donorRepo = `owner/${'d'.repeat(100)}`;
+  const donor = {
+    hostname: 'github.com',
+    username: 'long-donor-account-name',
+    repositories: [donorRepo],
+  };
+  const target = {
+    hostname: 'github.com',
+    username: 'p',
+    repositories: ['o/r'],
+  };
+  const state = capacityState(MAX_REVIEW_STATE_ENTRIES, {
+    account: donor,
+    repo: donorRepo,
+    shaFor: () => '\0'.repeat(128),
+  });
+  const initialBytes = padStateNearByteLimit(state, MAX_STATE_FILE_BYTES - 5);
+  assert.ok(initialBytes >= MAX_STATE_FILE_BYTES - 10);
+  let proofCalls = 0;
+  let closureCalls = 0;
+  const writtenBytes = [];
+  const dependencies = successfulDependencies([]);
+  dependencies.loadState = async () => state;
+  dependencies.saveState = async (_path, nextState) => {
+    writtenBytes.push(serializeState(nextState).serializedBytes);
+  };
+  dependencies.searchReviewRequestedPRs = async ({ repo }) => completeSearch(
+    repo === 'o/r' ? [{ repo, number: 1 }] : [],
+  );
+  dependencies.getPullRequest = async ({ repo, number }) => ({
+    headRefOid: 'target-sha',
+    number,
+    title: 'Target PR',
+    url: `https://github.com/${repo}/pull/${number}`,
+    body: '',
+    state: 'OPEN',
+  });
+  dependencies.reviewAlreadyPosted = async ({ repo }) => {
+    if (repo === donorRepo) proofCalls += 1;
+    return false;
+  };
+  dependencies.getPullRequestForStateGc = async ({ repo, number }) => {
+    closureCalls += 1;
+    return {
+      headRefOid: `old-${number}`,
+      number,
+      title: 'Historical PR',
+      url: `https://github.com/${repo}/pull/${number}`,
+      body: '',
+      state: 'OPEN',
+    };
+  };
+
+  const result = await pollOnce({
+    config: config([donor, target]),
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, true);
+  assert.equal(result.failures[0].note, 'review state capacity reached');
+  assert.equal(proofCalls, MAX_STATE_GC_CHECKS_PER_POLL - 1);
+  assert.equal(closureCalls, 1);
+  assert.deepEqual(writtenBytes, [initialBytes]);
 });
 
 test('a compacted marker entry rehydrates on the same SHA before diff or AI', async (t) => {

@@ -227,6 +227,7 @@ test('malformed review-state proof cursors fail closed', async (t) => {
 test('experimental proof cursor fields migrate once into predecessor-readable order', () => {
   const scopeA = 'github.com@octocat::owner/a';
   const scopeB = 'github.com@octocat::owner/b';
+  const scopeC = 'github.com@octocat::owner/c';
   const normalized = normalizeState({
     [`${scopeA}#1`]: {
       lastReviewedSha: 'a-1',
@@ -240,17 +241,38 @@ test('experimental proof cursor fields migrate once into predecessor-readable or
       lastReviewedSha: 'b-1',
       lastReviewedAt: '2026-07-25T00:00:00.000Z',
     },
+    [`${scopeB}#2`]: {
+      lastReviewedSha: 'b-2',
+      lastReviewedAt: '2026-07-25T00:00:00.000Z',
+    },
+    [`${scopeC}#1`]: {
+      lastReviewedSha: 'c-1',
+      lastReviewedAt: '2026-07-25T00:00:00.000Z',
+    },
+    [`${scopeC}#2`]: {
+      lastReviewedSha: 'c-2',
+      lastReviewedAt: '2026-07-25T00:00:00.000Z',
+    },
     [STATE_METADATA_KEY]: {
       version: 1,
       candidateCursors: {},
-      reviewStateProofAfterScope: scopeA,
-      reviewStateProofAfterKeys: { [scopeA]: `${scopeA}#1` },
+      reviewStateProofAfterScope: scopeB,
+      reviewStateProofAfterKeys: {
+        [scopeA]: `${scopeA}#1`,
+        [scopeB]: `${scopeB}#1`,
+        [scopeC]: `${scopeC}#1`,
+      },
     },
   });
 
   assert.deepEqual(
     Object.keys(normalized),
-    [`${scopeB}#1`, `${scopeA}#2`, `${scopeA}#1`, STATE_METADATA_KEY],
+    [
+      `${scopeC}#2`, `${scopeC}#1`,
+      `${scopeA}#2`, `${scopeA}#1`,
+      `${scopeB}#2`, `${scopeB}#1`,
+      STATE_METADATA_KEY,
+    ],
   );
   assert.deepEqual(normalized[STATE_METADATA_KEY], {
     version: 1,
