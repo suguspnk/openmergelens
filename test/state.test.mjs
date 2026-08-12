@@ -343,6 +343,41 @@ test('experimental proof cursor fields migrate once into predecessor-readable or
   });
 });
 
+test('six-figure transitional proof queue migration does not overflow the call stack', {
+  timeout: 10_000,
+}, () => {
+  const scope = 'github.com@a::o/a';
+  const entryCount = 130_001;
+  const state = Object.fromEntries(
+    Array.from({ length: entryCount }, (_, index) => [
+      `${scope}#${index + 1}`,
+      {
+        lastReviewedSha: 's',
+        lastReviewedAt: '2026-08-11T00:00:00.000Z',
+      },
+    ]),
+  );
+  state[STATE_METADATA_KEY] = {
+    version: 1,
+    candidateCursors: {},
+    reviewStateProofAfterScope: scope,
+    reviewStateProofAfterKeys: {
+      [scope]: `${scope}#1`,
+    },
+  };
+
+  const normalized = normalizeState(state, { enforceEntryLimit: false });
+  const keys = Object.keys(normalized);
+
+  assert.equal(keys.length, entryCount + 1);
+  assert.equal(keys[0], `${scope}#10`);
+  assert.equal(keys.at(-2), `${scope}#1`);
+  assert.deepEqual(normalized[STATE_METADATA_KEY], {
+    version: 1,
+    candidateCursors: {},
+  });
+});
+
 test('case-only PR aliases normalize without accepting numeric aliases', () => {
   const canonicalKey = 'github.com@work::owner/repo#7';
   const state = {

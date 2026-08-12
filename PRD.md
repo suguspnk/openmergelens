@@ -464,8 +464,11 @@ non-dry migration first.
 
 The file is ordinarily read with a 16 MiB pre-parse bound and can contain at
 most 10,000 review records. The explicit predecessor-capacity migration may
-read at most 32 MiB, then must atomically rewrite within the ordinary limits;
-larger files still fail before parsing. Scoped keys are canonical lowercase
+read at most 32 MiB. While a byte-neutral repair is still above the ordinary
+limit, its canonical progress save uses compact JSON so pretty-print expansion
+cannot exceed that predecessor envelope; the final repaired save returns to
+the ordinary pretty-printed format and limits. Larger files still fail before
+parsing. Scoped keys are canonical lowercase
 `HOST@USERNAME::owner/repo#N`; the only compatible legacy form is lowercase
 `owner/repo#N`, with case-only aliases normalized and one-account legacy state
 adopted before external work. Host, user, repository, and positive decimal PR
@@ -501,7 +504,9 @@ checks per poll. Remote checks require valid config-wide AI-processing consent.
 Each repair lookup is capped at five seconds, the repair window at 15 seconds,
 and three failed or malformed responses stop that poll's remote repair work.
 Authentication is scheduled in bounded batches only while the same end-to-end
-repair deadline remains live. Confirmed-deletion capacity is projected with
+repair deadline remains live. Each authentication subprocess receives the
+remaining request timeout and, if it ignores graceful termination, its detached
+process tree is force-killed after a bounded grace period. Confirmed-deletion capacity is projected with
 incremental exact entry and UTF-8 byte accounting rather than repeatedly
 serializing the full legacy state.
 If authentication consumes the deadline, all records for that attempted account

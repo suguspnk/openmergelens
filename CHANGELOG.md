@@ -29,6 +29,9 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
 - Rebound the parent and committed file after the final rename, reported
   unsupported Windows directory flushes as unconfirmed durability, and rotated
   deadline-exhausted legacy authentication batches fairly across polls.
+- Kept byte-neutral predecessor repair persistable when pretty formatting would
+  exceed 32 MiB, bounded six-figure cursor migration without argument spreading,
+  and force-killed GitHub authentication trees that outlive their timeout.
 - Accepted valid human and unrelated `[bot]` requested-reviewer actors while
   failing malformed or mistyped actor rows closed. Hardened state canonicality,
   future timestamps, and marker-version proof; moved exact UTF-8 entry/byte

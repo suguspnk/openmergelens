@@ -612,7 +612,7 @@ test('legacy repair deadline bounds authentication and ignores unrelated account
   assert.equal(calls.some((call) => call.username === 'other'), false);
 });
 
-test('legacy repair rotates authenticated account batches after deadline exhaustion', async (t) => {
+test('legacy repair persists a completed auth batch when the next deadline gate closes', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-upgrade-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const stateFile = path.join(root, 'state.json');
@@ -669,6 +669,72 @@ test('legacy repair rotates authenticated account batches after deadline exhaust
   const second = await pollOnce(options);
   assert.equal(second.failed, true);
   assert.equal(authenticatedUsernames[0], 'work-6');
+});
+
+test('near-32-MiB compact predecessor persists byte-neutral repair progress', {
+  timeout: 30_000,
+}, async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-upgrade-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const stateFile = path.join(root, 'state.json');
+  const compactAccount = {
+    hostname: 'github.com',
+    username: 'a',
+    repositories: ['o/a'],
+  };
+  const entryCount = 300_000;
+  const state = Object.fromEntries(
+    Array.from({ length: entryCount }, (_, index) => [
+      prKey('o/a', index + 1, compactAccount),
+      {
+        lastReviewedSha: 's',
+        lastReviewedAt: '2026-08-11T00:00:00.000Z',
+      },
+    ]),
+  );
+  const compact = JSON.stringify(state);
+  assert.ok(Buffer.byteLength(compact) < MAX_STATE_FILE_BYTES * 2);
+  assert.ok(
+    serializeState(state, {
+      enforceEntryLimit: false,
+      enforceByteLimit: false,
+    }).serializedBytes > MAX_STATE_FILE_BYTES * 2,
+  );
+  await writeFile(stateFile, compact);
+  const checked = [];
+  const dependencies = migrationDependencies();
+  dependencies.resolveGitHubAuth = async (candidateAccount) => ({
+    username: candidateAccount.username,
+  });
+  dependencies.getPullRequestForStateGc = async ({ repo, number }) => {
+    checked.push(number);
+    return {
+      headRefOid: 's',
+      number,
+      title: 'Tracked PR',
+      url: `https://github.com/${repo}/pull/${number}`,
+      body: '',
+      state: 'OPEN',
+    };
+  };
+  const options = migrationPollOptions(root, dependencies);
+  options.config.githubAccounts = [compactAccount];
+  options.config.aiProcessingConsent = createAiProcessingConsent(
+    'reviewer',
+    options.config.githubAccounts,
+  );
+
+  const first = await pollOnce(options);
+  assert.equal(first.failed, true);
+  assert.equal(checked.length, 1_000);
+  const firstPersisted = await readFile(stateFile, 'utf8');
+  assert.ok(Buffer.byteLength(firstPersisted) < MAX_STATE_FILE_BYTES * 2);
+  assert.equal(firstPersisted.includes('\n  "'), false);
+
+  const second = await pollOnce(options);
+  assert.equal(second.failed, true);
+  assert.equal(checked.length, 2_000);
+  assert.equal(checked[1_000], 1_001);
 });
 
 test('legacy auth rotation handles a byte-valid six-figure predecessor state', {

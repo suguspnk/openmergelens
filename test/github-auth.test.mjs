@@ -3,7 +3,33 @@ import assert from 'node:assert/strict';
 import {
   authEnvironment,
   parseAuthStatus,
+  runGitHubAuthCommand,
 } from '../lib/github-auth.mjs';
+
+test('GitHub auth timeout force-kills a child that ignores SIGTERM', {
+  skip: process.platform === 'win32',
+  timeout: 2_000,
+}, async () => {
+  const startedAt = Date.now();
+
+  await assert.rejects(
+    runGitHubAuthCommand(
+      process.execPath,
+      [
+        '-e',
+        'process.on("SIGTERM",()=>{});setInterval(()=>{},1000)',
+      ],
+      {
+        timeoutMs: 30,
+        environment: process.env,
+        hardKillGraceMs: 30,
+      },
+    ),
+    (err) => err?.code === 'ETIMEDOUT' && err?.signal === 'SIGKILL',
+  );
+
+  assert.ok(Date.now() - startedAt < 1_000);
+});
 
 test('parseAuthStatus returns every authenticated account and active state', () => {
   const output = `github.com
