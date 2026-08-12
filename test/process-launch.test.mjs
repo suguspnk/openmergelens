@@ -340,3 +340,73 @@ test('terminateProcessTree uses taskkill for a forced Windows tree stop', async 
   assert.deepEqual(invocation.args, ['/pid', '4321', '/t', '/f']);
   assert.equal(invocation.options.shell, false);
 });
+
+for (const failure of [
+  {
+    name: 'an asynchronous taskkill error',
+    emit(killer) {
+      killer.emit('error', Object.assign(new Error('spawn failed'), { code: 'ENOENT' }));
+    },
+  },
+  {
+    name: 'a non-zero taskkill exit',
+    emit(killer) {
+      killer.emit('close', 1, null);
+    },
+  },
+  {
+    name: 'a timed-out taskkill process',
+    emit(killer) {
+      killer.emit('close', null, 'SIGTERM');
+    },
+  },
+]) {
+  test(`terminateProcessTree rejects ${failure.name}`, async () => {
+    const signals = [];
+    const target = {
+      pid: 4321,
+      kill(signal) {
+        signals.push(signal);
+        return true;
+      },
+    };
+    const spawnProcess = () => {
+      const killer = new EventEmitter();
+      process.nextTick(() => failure.emit(killer));
+      return killer;
+    };
+
+    await assert.rejects(
+      terminateProcessTree(target, {
+        platform: 'win32',
+        force: true,
+        spawnProcess,
+      }),
+      (err) => err?.code === 'ETERMINATE' && err?.pid === 4321,
+    );
+    assert.deepEqual(signals, ['SIGKILL']);
+  });
+}
+
+test('terminateProcessTree rejects a synchronous taskkill launch failure', async () => {
+  const signals = [];
+  const target = {
+    pid: 4321,
+    kill(signal) {
+      signals.push(signal);
+      return true;
+    },
+  };
+
+  await assert.rejects(
+    terminateProcessTree(target, {
+      platform: 'win32',
+      force: true,
+      spawnProcess() {
+        throw Object.assign(new Error('spawn failed'), { code: 'ENOENT' });
+      },
+    }),
+    (err) => err?.code === 'ETERMINATE' && err?.pid === 4321,
+  );
+  assert.deepEqual(signals, ['SIGKILL']);
+});

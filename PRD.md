@@ -78,8 +78,9 @@ openmergelens/
 ## Per-user runtime state
 
 All per-user runtime state lives outside this repository under the user home:
-`~/.openmergelens/` by default, or the directory selected by the
-`OPENMERGELENS_HOME` environment variable. This includes `config.json`,
+`~/.openmergelens/` by default, or on POSIX the directory selected by the
+`OPENMERGELENS_HOME` environment variable. Windows requires the canonical
+per-user default. This includes `config.json`,
 `state.json`, `poll.log`, retained `reports/`, editable `docs/review-prompts/`
 and `docs/learnings/` files, and the generated `scheduler-environment.json`.
 The repository `.gitignore` still ignores local-runtime names such as
@@ -420,11 +421,13 @@ Repository targets are always explicit `OWNER/REPO` strings.
 
 On POSIX, `stateFile` supports an explicit absolute path subject to the
 ownership and mode checks below. Windows cannot portably verify an arbitrary
-parent ACL through Node, so Windows state paths must remain within the private
-OpenMergeLens user home. Relative values are resolved under the user home, so
-the `"./state.json"` value in
+parent ACL or reparse-point chain through Node, so Windows must use the canonical
+per-user OpenMergeLens home without an `OPENMERGELENS_HOME` override and
+`stateFile` must name a direct file in that directory. Existing Windows
+overrides require explicit relocation before upgrade. Relative values are resolved
+under the user home, so the `"./state.json"` value in
 `config.example.json` means `~/.openmergelens/state.json` by default (or the
-corresponding path under `OPENMERGELENS_HOME`).
+corresponding path under `OPENMERGELENS_HOME` on POSIX).
 
 ```json
 {
@@ -512,6 +515,8 @@ remaining request timeout. On POSIX, a process that ignores graceful termination
 has its detached tree force-killed after a bounded grace period even when the
 leader exits first. On Windows, forced tree termination begins immediately at
 the timeout boundary while the leader PID still identifies its descendants.
+Failure or nonzero exit from Windows `taskkill /t /f` is surfaced as a tree
+termination failure rather than a successful timeout cleanup.
 Confirmed-deletion capacity is projected with
 incremental exact entry and UTF-8 byte accounting rather than repeatedly
 serializing the full legacy state.

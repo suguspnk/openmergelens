@@ -33,8 +33,9 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
   exceed 32 MiB, bounded six-figure cursor migration without argument spreading,
   and force-killed GitHub authentication trees that outlive their timeout or
   leader process, starting Windows tree termination before the leader PID can
-  exit. Windows state paths now remain inside the private
-  OpenMergeLens home where arbitrary parent ACLs cannot be verified portably.
+  exit and surfacing failed `taskkill` cleanup. Windows now requires the
+  canonical default OpenMergeLens home and a direct-child state file because
+  arbitrary ACLs and reparse points cannot be verified portably through Node.
 - Accepted valid human and unrelated `[bot]` requested-reviewer actors while
   failing malformed or mistyped actor rows closed. Hardened state canonicality,
   future timestamps, and marker-version proof; moved exact UTF-8 entry/byte

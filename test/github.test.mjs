@@ -7,6 +7,7 @@ import {
   diffAnchors,
   getPullRequest,
   getPullRequestDiff,
+  ghSpawn,
   hasActiveReviewRequest,
   isValidatedReviewRequestSearchResult,
   postReview,
@@ -28,6 +29,71 @@ import {
   MAX_ACTIVE_REVIEW_REQUEST_USERS,
   MAX_DIFF_ANCHORS,
 } from '../lib/security-limits.mjs';
+
+function fakeGhChild() {
+  const child = new EventEmitter();
+  child.pid = 4321;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdin = {
+    write() {},
+    end() {},
+    on() {},
+  };
+  return child;
+}
+
+test('Windows gh timeout starts forced tree termination while its leader is live', {
+  timeout: 2_000,
+}, async () => {
+  const child = fakeGhChild();
+  let leaderAlive = true;
+  const calls = [];
+  const terminate = async (_child, options) => {
+    calls.push({ ...options, leaderAlive });
+    leaderAlive = false;
+    process.nextTick(() => child.emit('close', 1, 'SIGKILL'));
+  };
+
+  await assert.rejects(
+    ghSpawn(['auth', 'status'], {
+      timeoutMs: 10,
+      platform: 'win32',
+      spawnProcess: () => child,
+      terminate,
+    }),
+    (err) => err?.code === 'ETIMEDOUT',
+  );
+  assert.deepEqual(calls, [{
+    platform: 'win32',
+    force: true,
+    leaderAlive: true,
+  }]);
+});
+
+test('Windows gh timeout surfaces failed process-tree termination', {
+  timeout: 2_000,
+}, async () => {
+  const child = fakeGhChild();
+  const terminationFailure = Object.assign(new Error('taskkill failed'), {
+    code: 'ETERMINATE',
+  });
+
+  await assert.rejects(
+    ghSpawn(['auth', 'status'], {
+      timeoutMs: 10,
+      platform: 'win32',
+      spawnProcess: () => child,
+      terminate: async () => {
+        throw terminationFailure;
+      },
+    }),
+    (err) =>
+      err?.code === 'ETERMINATE' &&
+      err?.terminalCode === 'ETIMEDOUT' &&
+      err?.cause === terminationFailure,
+  );
+});
 
 function mockGhStdout(t, outputs) {
   let callIndex = 0;

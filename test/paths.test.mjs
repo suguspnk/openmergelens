@@ -89,6 +89,7 @@ test('Windows review state paths remain inside the private user home', () => {
   const options = {
     platform: 'win32',
     homeDirectory: 'C:\\Users\\octocat\\.openmergelens',
+    osHomeDirectory: 'C:\\Users\\octocat',
   };
 
   assert.equal(
@@ -96,17 +97,56 @@ test('Windows review state paths remain inside the private user home', () => {
     'C:\\Users\\octocat\\.openmergelens\\state.json',
   );
   assert.equal(
-    resolveUserPath('c:\\users\\OCTOCAT\\.openmergelens\\nested\\state.json', options),
-    'c:\\users\\OCTOCAT\\.openmergelens\\nested\\state.json',
+    resolveUserPath('c:\\users\\OCTOCAT\\.openmergelens\\review-state.json', options),
+    'c:\\users\\OCTOCAT\\.openmergelens\\review-state.json',
   );
   for (const unsafe of [
+    'nested\\state.json',
+    'state.json:alternate-stream',
+    'NUL.json',
     '..\\state.json',
     'C:\\Users\\octocat\\state.json',
     '\\\\server\\share\\state.json',
   ]) {
     assert.throws(
       () => resolveUserPath(unsafe, options),
-      /must remain within OPENMERGELENS_HOME/u,
+      /must be a direct file in the default per-user OpenMergeLens home/u,
     );
   }
+});
+
+test('Windows rejects a non-default OpenMergeLens home', () => {
+  const options = {
+    platform: 'win32',
+    environment: {
+      OPENMERGELENS_HOME: 'C:\\shared\\openmergelens',
+    },
+    osHomeDirectory: 'C:\\Users\\octocat',
+  };
+
+  assert.throws(
+    () => userHome(options),
+    /must use the default per-user location/u,
+  );
+  assert.throws(
+    () => resolveUserPath('.\\state.json', {
+      platform: 'win32',
+      homeDirectory: options.environment.OPENMERGELENS_HOME,
+      osHomeDirectory: options.osHomeDirectory,
+    }),
+    /must be a direct file in the default per-user OpenMergeLens home/u,
+  );
+});
+
+test('Windows accepts an equivalent canonical default home override', () => {
+  assert.equal(
+    userHome({
+      platform: 'win32',
+      environment: {
+        OPENMERGELENS_HOME: 'c:\\users\\OCTOCAT\\.openmergelens',
+      },
+      osHomeDirectory: 'C:\\Users\\octocat',
+    }),
+    'C:\\Users\\octocat\\.openmergelens',
+  );
 });

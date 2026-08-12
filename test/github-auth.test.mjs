@@ -126,6 +126,35 @@ test('Windows auth timeout starts forced tree kill before the leader exits', {
   assert.equal(descendantAlive, false);
 });
 
+test('Windows auth reports a failed forced tree termination', {
+  timeout: 2_000,
+}, async () => {
+  const child = new EventEmitter();
+  child.pid = 4321;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  const terminationFailure = Object.assign(
+    new Error('taskkill exited with status 1'),
+    { code: 'ETERMINATE' },
+  );
+
+  await assert.rejects(
+    runGitHubAuthCommand('gh', ['auth', 'status'], {
+      timeoutMs: 10,
+      environment: {},
+      platform: 'win32',
+      spawnProcess: () => child,
+      terminate: async () => {
+        throw terminationFailure;
+      },
+    }),
+    (err) =>
+      err?.code === 'ETERMINATE' &&
+      err?.timeoutCode === 'ETIMEDOUT' &&
+      err?.cause === terminationFailure,
+  );
+});
+
 test('parseAuthStatus returns every authenticated account and active state', () => {
   const output = `github.com
   ✓ Logged in to github.com account octocat-work (keyring)
