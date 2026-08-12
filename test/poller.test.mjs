@@ -4693,63 +4693,115 @@ for (const [label, entryCount] of [
   });
 }
 
-test('unproven capacity donors are retained when marker proof is absent', async (t) => {
+test('deconfigured and selector-unselected donors consume bounded proof attempts without blocking authorized work', async (t) => {
   const files = await fixture(t);
-  const donor = { ...work, repositories: ['owner/repo'] };
-  const target = { ...personal, repositories: ['other/repo'] };
-  const fullState = capacityState(MAX_REVIEW_STATE_ENTRIES, { account: donor });
-  let proofCalls = 0;
-  let diffCalls = 0;
-  let reviewerCalls = 0;
+  const deconfigured = {
+    hostname: 'github.com',
+    username: 'retired',
+    repositories: ['owner/deconfigured'],
+  };
+  const unselected = { ...work, repositories: ['owner/unselected'] };
+  const target = { ...personal, repositories: ['owner/target'] };
+  const deconfiguredEntries = 12;
+  const targetEntries = MAX_STATE_GC_CHECKS_PER_POLL;
+  const unselectedEntries = MAX_REVIEW_STATE_ENTRIES -
+    deconfiguredEntries - targetEntries;
+  const state = {
+    ...capacityState(deconfiguredEntries, {
+      account: deconfigured,
+      repo: 'owner/deconfigured',
+    }),
+    ...capacityState(unselectedEntries, {
+      account: unselected,
+      repo: 'owner/unselected',
+    }),
+    ...capacityState(targetEntries, {
+      account: target,
+      repo: 'owner/target',
+      shaFor: (number) => `old-target-sha-${number}`,
+    }),
+  };
+  let persistedState = structuredClone(state);
+  let saveCalls = 0;
+  let unauthorizedProofCalls = 0;
+  let gcCalls = 0;
   let postCalls = 0;
   const dependencies = successfulDependencies([]);
-  dependencies.loadState = async () => fullState;
-  let lastSaved;
+  dependencies.loadState = async () => persistedState;
   dependencies.saveState = async (_path, nextState) => {
-    lastSaved = structuredClone(nextState);
+    saveCalls += 1;
+    persistedState = structuredClone(nextState);
   };
-  dependencies.searchReviewRequestedPRs = async ({ repo }) => completeSearch(
-    repo === 'other/repo' ? [{ repo, number: 1 }] : [],
-  );
+  dependencies.searchReviewRequestedPRs = async ({ repo }) => completeSearch([
+    { repo, number: MAX_STATE_GC_CHECKS_PER_POLL + 1 },
+    { repo, number: 1 },
+  ]);
   dependencies.getPullRequest = async ({ repo, number }) => ({
-    headRefOid: 'target-sha',
+    headRefOid: `target-sha-${number}`,
     number,
-    title: 'Target PR',
+    title: `Target PR ${number}`,
     url: `https://github.com/${repo}/pull/${number}`,
     body: '',
     state: 'OPEN',
   });
-  dependencies.reviewAlreadyPosted = async () => {
-    proofCalls += 1;
-    if (proofCalls === 1) throw new Error('HTTP 404: Not Found');
+  dependencies.reviewAlreadyPosted = async ({ repo }) => {
+    if (repo !== 'owner/target') unauthorizedProofCalls += 1;
     return false;
   };
-  dependencies.getPullRequestDiff = async () => {
-    diffCalls += 1;
-    return '';
+  dependencies.getPullRequestForStateGc = async ({ repo, number }) => {
+    gcCalls += 1;
+    return {
+      headRefOid: `target-sha-${number}`,
+      number,
+      title: `Target PR ${number}`,
+      url: `https://github.com/${repo}/pull/${number}`,
+      body: '',
+      state: 'OPEN',
+    };
   };
-  dependencies.invokeMultiPassReview = async () => {
-    reviewerCalls += 1;
-    return { summary: 'reviewed', findings: [] };
-  };
-  dependencies.postReview = async () => {
-    postCalls += 1;
-  };
+  dependencies.postReview = async ({ scheduleMutation }) =>
+    scheduleMutation(async () => {
+      postCalls += 1;
+      assert.equal(saveCalls, 0);
+    });
 
   const result = await pollOnce({
-    config: config([donor, target]),
+    config: {
+      ...config([unselected, target]),
+      reviewBatchSize: 1,
+    },
+    accountSelector: {
+      hostname: personal.hostname,
+      username: personal.username,
+    },
     ...files,
     dependencies,
   });
 
   assert.equal(result.failed, true);
+  assert.equal(result.reviewed, 1);
   assert.equal(result.failures[0].note, 'review state capacity reached');
-  assert.equal(proofCalls, MAX_STATE_GC_CHECKS_PER_POLL - 1);
-  assert.equal(diffCalls, 0);
-  assert.equal(reviewerCalls, 0);
-  assert.equal(postCalls, 0);
-  assert.ok(fullState[prKey('owner/repo', 1, donor)]);
-  assert.ok(reviewStateGcAfterKey(lastSaved));
+  assert.equal(result.outcomes[0].number, 1);
+  assert.equal(result.outcomes[0].status, 're-reviewed');
+  assert.equal(unauthorizedProofCalls, 0);
+  assert.equal(gcCalls, 1);
+  assert.equal(postCalls, 1);
+  assert.equal(saveCalls, 1);
+  assert.equal(reviewStateGcAfterKey(persistedState), null);
+  assert.equal(
+    persistedState[prKey('owner/target', 1, target)].lastReviewedSha,
+    'target-sha-1',
+  );
+  assert.equal(
+    Object.keys(persistedState).filter((key) => key !== STATE_METADATA_KEY).length,
+    MAX_REVIEW_STATE_ENTRIES,
+  );
+  for (let number = 1; number <= deconfiguredEntries; number += 1) {
+    assert.ok(persistedState[prKey('owner/deconfigured', number, deconfigured)]);
+  }
+  for (let number = 1; number <= MAX_STATE_GC_CHECKS_PER_POLL; number += 1) {
+    assert.ok(persistedState[prKey('owner/unselected', number, unselected)]);
+  }
 });
 
 test('marker-proof cursor reaches a later exact proof on the next poll without starving closure GC', async (t) => {
@@ -4801,6 +4853,7 @@ test('marker-proof cursor reaches a later exact proof on the next poll without s
       if (repo !== 'owner/repo') return false;
       const key = prKey(repo, number, donor);
       proofCalls.push(key);
+      if (key === proofOrder[0]) throw new Error('HTTP 404: Not Found');
       return number === exactProofNumber;
     };
     return dependencies;
