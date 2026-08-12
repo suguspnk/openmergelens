@@ -502,7 +502,13 @@ after rename. A parent-directory flush failure is explicitly post-commit: it is
 reported as a durability warning while retaining the committed in-memory and
 on-disk state instead of pretending rollback occurred. Filesystems where
 Windows directory flush is unsupported use the same committed-but-not-confirmed
-warning status rather than claiming crash durability.
+warning status rather than claiming crash durability. If target or parent
+verification fails after the namespace rename, the result is explicitly
+indeterminate rather than rolled back: the poll strictly reloads the state path
+before any later queued write and disables later writes if reconciliation fails.
+Windows state filenames also reject Win32 device aliases (including superscript
+`COM`/`LPT` forms), alternate streams, and trailing-dot or trailing-space
+equivalents before resolution.
 
 One legacy file containing more than 10,000 otherwise valid records can upgrade
 through deterministic 365-day expiry plus at most 1,000 authenticated PR-state

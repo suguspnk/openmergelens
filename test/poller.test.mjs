@@ -25,6 +25,7 @@ import {
 } from '../lib/security-limits.mjs';
 import { MAX_CANDIDATE_METADATA_PER_POLL } from '../lib/poller.mjs';
 import {
+  loadState,
   prKey,
   reviewStateGcAfterKey,
   saveState,
@@ -3652,6 +3653,69 @@ test('a posted review is reconciled after state persistence fails without repost
     state['github.com@work::owner/repo#7'].lastReviewedSha,
     'sha-1',
   );
+});
+
+test('an indeterminate committed save reloads before the next queued state write', async (t) => {
+  const files = await fixture(t);
+  const dependencies = successfulDependencies([]);
+  dependencies.searchReviewRequestedPRs = async ({ repo }) => completeSearch([
+    { repo, number: 7 },
+    { repo, number: 8 },
+  ]);
+  dependencies.getPullRequest = async ({ number }) => ({
+    headRefOid: `sha-${number}`,
+    number,
+    title: `PR ${number}`,
+    url: `https://github.com/owner/repo/pull/${number}`,
+    body: '',
+    state: 'OPEN',
+  });
+
+  let reconciliationCalls = 0;
+  let releaseFirstPostCommit;
+  const bothCandidatesReconciled = new Promise((resolve) => {
+    releaseFirstPostCommit = resolve;
+  });
+  dependencies.reviewAlreadyPosted = async () => {
+    reconciliationCalls += 1;
+    if (reconciliationCalls === 2) releaseFirstPostCommit();
+    return true;
+  };
+
+  let saveCalls = 0;
+  dependencies.saveState = async (statePath, nextState, options = {}) => {
+    saveCalls += 1;
+    if (saveCalls === 1) {
+      return saveState(statePath, nextState, {
+        ...options,
+        afterCommitRename: async () => {
+          await bothCandidatesReconciled;
+          throw new Error('simulated post-rename verification failure');
+        },
+      });
+    }
+    return saveState(statePath, nextState, options);
+  };
+
+  const result = await pollOnce({
+    config: config([work]),
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(reconciliationCalls, 2);
+  assert.ok(saveCalls >= 2);
+  assert.equal(result.failed, true);
+  assert.equal(result.reviewed, 1);
+  assert.deepEqual(
+    result.failures.map(({ status, note }) => ({ status, note })),
+    [{ status: 'failed', note: 'tracking recovery failed' }],
+  );
+  assert.equal(result.outcomes[0].status, 'recovered');
+
+  const persisted = await loadState(files.stateFile);
+  assert.equal(persisted[prKey('owner/repo', 7, work)].lastReviewedSha, 'sha-7');
+  assert.equal(persisted[prKey('owner/repo', 8, work)].lastReviewedSha, 'sha-8');
 });
 
 test('nullable unrelated history rows do not block poll rehydration', async (t) => {

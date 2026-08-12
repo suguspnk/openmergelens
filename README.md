@@ -362,13 +362,18 @@ Compaction is deterministic and may reclaim only oldest records carrying
 marker for that repo, PR, and SHA. Current, reserved, unscoped, malformed, and
 unproven records are never evicted; deconfigured scopes have zero protected
 share. Every compaction and review save is atomic and rolls back in memory if
-persistence fails before commit. On POSIX, an absolute `stateFile` remains
+persistence fails before commit. A failure after the namespace rename is
+explicitly indeterminate: polling strictly reloads the committed path before a
+later queued write, and disables further writes for that poll if reload cannot
+reconcile it. On POSIX, an absolute `stateFile` remains
 supported under a current-user-owned parent that is not group/other-writable
 (including conventional `0755` directories); writable shared parents fail
 closed. Windows cannot portably verify arbitrary ACLs or reparse points through
 Node, so `OPENMERGELENS_HOME` must remain the canonical per-user default and
 `stateFile` must name a direct file in that directory. Existing Windows
-overrides must be relocated there before upgrading. State bytes and the parent
+overrides must be relocated there before upgrading. Windows device aliases,
+including superscript `COM`/`LPT` forms, alternate streams, and names ending in
+a dot or space are rejected before path resolution. State bytes and the parent
 directory are flushed around atomic rename.
 If the directory flush fails after rename, the committed state is retained and
 the poll emits a durability warning instead of rolling memory back; unsupported

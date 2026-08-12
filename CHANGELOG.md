@@ -23,6 +23,10 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
 - Hardened state reads and atomic replacement against symlink, shared-parent,
   parent-replacement, and cleanup races. Legacy over-cap repair now applies one
   end-to-end deadline and incrementally projects confirmed closure reclamation.
+- Classified post-rename state verification failures as indeterminate commits,
+  forcing strict reload before queued writes, and restricted partial GitHub auth
+  salvage to completed non-zero status exits. Windows path validation now rejects
+  Win32 device aliases, superscript `COM`/`LPT` forms, and trailing-dot/space names.
 - Made successful state replacement crash-durable by flushing its parent
   directory, with explicit post-commit warning semantics, while retaining
   existing absolute paths in owner-controlled non-writable POSIX directories.

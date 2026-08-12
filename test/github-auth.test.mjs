@@ -3,9 +3,66 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import {
   authEnvironment,
+  listAuthenticatedAccounts,
   parseAuthStatus,
   runGitHubAuthCommand,
 } from '../lib/github-auth.mjs';
+
+const partialAuthStatus = `github.com
+  ✓ Logged in to github.com account octocat (keyring)
+  - Active account: true
+`;
+
+test('listAuthenticatedAccounts salvages completed non-zero auth status output', async () => {
+  const accounts = await listAuthenticatedAccounts({
+    runCommand: async () => {
+      throw Object.assign(new Error('one stored account is invalid'), {
+        code: 1,
+        signal: null,
+        completedExit: true,
+        stdout: partialAuthStatus,
+        stderr: '',
+      });
+    },
+  });
+
+  assert.deepEqual(accounts, [{
+    hostname: 'github.com',
+    username: 'octocat',
+    active: true,
+  }]);
+});
+
+test('listAuthenticatedAccounts propagates abnormal errors despite partial output', async () => {
+  const terminationFailure = Object.assign(new Error('tree termination failed'), {
+    code: 'ETERMINATE',
+    stdout: partialAuthStatus,
+    stderr: '',
+  });
+
+  await assert.rejects(
+    listAuthenticatedAccounts({
+      runCommand: async () => { throw terminationFailure; },
+    }),
+    (err) => err === terminationFailure,
+  );
+});
+
+test('listAuthenticatedAccounts does not infer a completed exit from a numeric error code', async () => {
+  const outputLimitFailure = Object.assign(new Error('auth output exceeded limit'), {
+    code: 1,
+    signal: null,
+    stdout: partialAuthStatus,
+    stderr: '',
+  });
+
+  await assert.rejects(
+    listAuthenticatedAccounts({
+      runCommand: async () => { throw outputLimitFailure; },
+    }),
+    (err) => err === outputLimitFailure,
+  );
+});
 
 test('GitHub auth timeout force-kills a child that ignores SIGTERM', {
   skip: process.platform === 'win32',

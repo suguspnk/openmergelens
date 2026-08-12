@@ -29,6 +29,7 @@ import {
   recordCandidateCursor,
   recordReviewStateGcAfterKey,
   recordReviewStateGcPosition,
+  REVIEW_STATE_COMMIT_INDETERMINATE,
   rotateReviewStateProofQueue,
   reviewScopeKey,
   reviewStateEntryCount,
@@ -1011,6 +1012,36 @@ test('atomic replacement failure preserves the previous state without backup rec
   );
 
   assert.equal(await readFile(stateFile, 'utf8'), originalBytes);
+  assert.deepEqual(await readdir(directory), ['state.json']);
+});
+
+test('a post-rename verification failure reports an indeterminate committed state', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const replacement = {
+    [prKey('owner/repo', 2, reviewer)]: {
+      lastReviewedSha: 'sha-2',
+      lastReviewedAt: '2026-07-28T01:00:00.000Z',
+    },
+  };
+
+  await assert.rejects(
+    saveState(stateFile, replacement, {
+      afterCommitRename: async () => {
+        throw new Error('simulated post-rename verification failure');
+      },
+    }),
+    (err) => {
+      assert.equal(err.code, REVIEW_STATE_COMMIT_INDETERMINATE);
+      assert.equal(err.commitStatus, 'indeterminate');
+      assert.equal(err.committed, true);
+      assert.match(err.cause.message, /post-rename verification failure/u);
+      return true;
+    },
+  );
+
+  assert.deepEqual(await loadState(stateFile), replacement);
   assert.deepEqual(await readdir(directory), ['state.json']);
 });
 
