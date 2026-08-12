@@ -57,6 +57,7 @@ test('PRD documents bounded compatible review-state retention', async () => {
   assert.match(prd, /ordinarily read with a 16 MiB pre-parse bound and can contain at\s+most 10,000/u);
   assert.match(prd, /predecessor-capacity migration may\s+read at most 32 MiB/u);
   assert.match(prd, /Each repair lookup is capped at five seconds,[\s\S]*?three failed or malformed responses stop/u);
+  assert.match(prd, /requires a non-symlink parent directory owned by the\s+current user and private on POSIX/u);
   assert.match(prd, /reserve the candidate's\s+exact final key, SHA, timestamp, entry count, and bytes before marker\s+reconciliation, diff fetch, prompt reads, or AI/u);
   assert.match(prd, /equal soft entry and byte shares and can borrow unused\s+global space/u);
   assert.match(prd, /never evicts the current key, an active reservation, unscoped\/invalid state, or\s+a record without exact marker proof/u);

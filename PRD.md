@@ -474,6 +474,12 @@ characters, require canonical ISO timestamps no more than five minutes in the
 future, and optionally carry only `reviewMarkerVersion: 1`. Invalid state is
 left untouched and fails before authentication or GitHub work.
 
+Atomic state replacement requires a non-symlink parent directory owned by the
+current user and private on POSIX. The writer retains handles for that directory
+and the private temporary file, backs up an existing regular target, and verifies
+the committed target against the held file identity before deleting the backup.
+Any substitution restores the prior target and fails closed.
+
 One legacy file containing more than 10,000 otherwise valid records can upgrade
 through deterministic 365-day expiry plus at most 1,000 authenticated PR-state
 checks per poll. Remote checks require valid config-wide AI-processing consent.

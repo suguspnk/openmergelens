@@ -857,7 +857,38 @@ test('temporary-path replacement cannot chmod a victim or replace state', {
   assert.deepEqual((await readdir(directory)).sort(), ['state.json', 'victim.txt']);
 });
 
-test('saving an absolute state path does not tighten its existing parent', {
+test('post-check substitution cannot commit attacker content', {
+  skip: process.platform === 'win32',
+}, async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const initialState = {
+    [prKey('owner/repo', 1, reviewer)]: {
+      lastReviewedSha: 'sha-1',
+      lastReviewedAt: '2026-07-28T00:00:00.000Z',
+    },
+  };
+  await saveState(stateFile, initialState);
+  const originalBytes = await readFile(stateFile, 'utf8');
+
+  await assert.rejects(
+    saveState(stateFile, {}, {
+      afterIdentityCheck: async (temporaryPath) => {
+        await rm(temporaryPath);
+        await writeFile(temporaryPath, '{"attacker":true}\n');
+      },
+    }),
+    /temporary file identity changed during commit/u,
+  );
+
+  assert.equal(await readFile(stateFile, 'utf8'), originalBytes);
+  assert.equal((await lstat(stateFile)).isFile(), true);
+  assert.equal((await lstat(stateFile)).isSymbolicLink(), false);
+  assert.deepEqual(await readdir(directory), ['state.json']);
+});
+
+test('saving rejects an unsafe existing parent without tightening it', {
   skip: process.platform === 'win32',
 }, async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-shared-state-'));
@@ -865,8 +896,11 @@ test('saving an absolute state path does not tighten its existing parent', {
   await chmod(root, 0o755);
 
   const stateFile = path.join(root, 'state.json');
-  await saveState(stateFile, {});
+  await assert.rejects(
+    saveState(stateFile, {}),
+    /parent directory must be private and user-owned/u,
+  );
 
   assert.equal((await stat(root)).mode & 0o777, 0o755);
-  assert.equal((await stat(stateFile)).mode & 0o777, 0o600);
+  await assert.rejects(stat(stateFile), { code: 'ENOENT' });
 });
