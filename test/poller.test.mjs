@@ -4693,7 +4693,7 @@ for (const [label, entryCount] of [
   });
 }
 
-test('deconfigured and selector-unselected donors consume bounded proof attempts without blocking authorized work', async (t) => {
+test('locally ineligible proof donors do not starve selected closure GC across polls', async (t) => {
   const files = await fixture(t);
   const deconfigured = {
     hostname: 'github.com',
@@ -4703,7 +4703,7 @@ test('deconfigured and selector-unselected donors consume bounded proof attempts
   const unselected = { ...work, repositories: ['owner/unselected'] };
   const target = { ...personal, repositories: ['owner/target'] };
   const deconfiguredEntries = 12;
-  const targetEntries = MAX_STATE_GC_CHECKS_PER_POLL;
+  const targetEntries = MAX_STATE_GC_CHECKS_PER_POLL + 1;
   const unselectedEntries = MAX_REVIEW_STATE_ENTRIES -
     deconfiguredEntries - targetEntries;
   const state = {
@@ -4721,87 +4721,122 @@ test('deconfigured and selector-unselected donors consume bounded proof attempts
       shaFor: (number) => `old-target-sha-${number}`,
     }),
   };
+  const deconfiguredPrefix = prKey('owner/deconfigured', 1, deconfigured)
+    .slice(0, -1);
+  const unselectedPrefix = prKey('owner/unselected', 1, unselected)
+    .slice(0, -1);
+  const targetPrefix = prKey('owner/target', 1, target).slice(0, -1);
+  const ineligibleKeys = Object.keys(state).filter((key) =>
+    key.startsWith(deconfiguredPrefix) || key.startsWith(unselectedPrefix),
+  );
+  const targetKeys = Object.keys(state)
+    .filter((key) => key.startsWith(targetPrefix))
+    .sort();
+  const closedKey = targetKeys[MAX_STATE_GC_CHECKS_PER_POLL];
   let persistedState = structuredClone(state);
   let saveCalls = 0;
   let unauthorizedProofCalls = 0;
-  let gcCalls = 0;
+  let selectedProofCalls = 0;
+  let currentReconciliationCalls = 0;
+  const gcKeys = [];
   let postCalls = 0;
-  const dependencies = successfulDependencies([]);
-  dependencies.loadState = async () => persistedState;
-  dependencies.saveState = async (_path, nextState) => {
-    saveCalls += 1;
-    persistedState = structuredClone(nextState);
-  };
-  dependencies.searchReviewRequestedPRs = async ({ repo }) => completeSearch([
-    { repo, number: MAX_STATE_GC_CHECKS_PER_POLL + 1 },
-    { repo, number: 1 },
-  ]);
-  dependencies.getPullRequest = async ({ repo, number }) => ({
-    headRefOid: `target-sha-${number}`,
-    number,
-    title: `Target PR ${number}`,
-    url: `https://github.com/${repo}/pull/${number}`,
-    body: '',
-    state: 'OPEN',
-  });
-  dependencies.reviewAlreadyPosted = async ({ repo }) => {
-    if (repo !== 'owner/target') unauthorizedProofCalls += 1;
-    return false;
-  };
-  dependencies.getPullRequestForStateGc = async ({ repo, number }) => {
-    gcCalls += 1;
-    return {
+  const newNumber = targetEntries + 1;
+
+  function dependenciesForPoll() {
+    const dependencies = successfulDependencies([]);
+    dependencies.loadState = async () => structuredClone(persistedState);
+    dependencies.saveState = async (_path, nextState) => {
+      saveCalls += 1;
+      persistedState = structuredClone(nextState);
+    };
+    dependencies.searchReviewRequestedPRs = async ({ repo }) => completeSearch([
+      { repo, number: newNumber },
+    ]);
+    dependencies.getPullRequest = async ({ repo, number }) => ({
       headRefOid: `target-sha-${number}`,
       number,
       title: `Target PR ${number}`,
       url: `https://github.com/${repo}/pull/${number}`,
       body: '',
       state: 'OPEN',
-    };
-  };
-  dependencies.postReview = async ({ scheduleMutation }) =>
-    scheduleMutation(async () => {
-      postCalls += 1;
-      assert.equal(saveCalls, 0);
     });
+    dependencies.reviewAlreadyPosted = async ({ repo, number }) => {
+      if (repo === 'owner/target' && number === newNumber) {
+        currentReconciliationCalls += 1;
+      } else if (repo === 'owner/target') selectedProofCalls += 1;
+      else unauthorizedProofCalls += 1;
+      return false;
+    };
+    dependencies.getPullRequestForStateGc = async ({ repo, number }) => {
+      const key = prKey(repo, number, target);
+      gcKeys.push(key);
+      return {
+        headRefOid: `old-target-sha-${number}`,
+        number,
+        title: `Target PR ${number}`,
+        url: `https://github.com/${repo}/pull/${number}`,
+        body: '',
+        state: key === closedKey ? 'CLOSED' : 'OPEN',
+      };
+    };
+    dependencies.postReview = async ({ scheduleMutation }) =>
+      scheduleMutation(async () => {
+        postCalls += 1;
+      });
+    return dependencies;
+  }
 
-  const result = await pollOnce({
-    config: {
-      ...config([unselected, target]),
-      reviewBatchSize: 1,
-    },
-    accountSelector: {
-      hostname: personal.hostname,
-      username: personal.username,
-    },
-    ...files,
-    dependencies,
-  });
+  async function runPoll() {
+    return pollOnce({
+      config: {
+        ...config([unselected, target]),
+        reviewBatchSize: 1,
+      },
+      accountSelector: {
+        hostname: personal.hostname,
+        username: personal.username,
+      },
+      ...files,
+      dependencies: dependenciesForPoll(),
+    });
+  }
 
-  assert.equal(result.failed, true);
-  assert.equal(result.reviewed, 1);
-  assert.equal(result.failures[0].note, 'review state capacity reached');
-  assert.equal(result.outcomes[0].number, 1);
-  assert.equal(result.outcomes[0].status, 're-reviewed');
-  assert.equal(unauthorizedProofCalls, 0);
-  assert.equal(gcCalls, 1);
-  assert.equal(postCalls, 1);
+  const first = await runPoll();
+  assert.equal(first.failed, true);
+  assert.equal(first.reviewed, 0);
+  assert.equal(first.failures[0].note, 'review state capacity reached');
+  assert.deepEqual(gcKeys, targetKeys.slice(0, MAX_STATE_GC_CHECKS_PER_POLL));
+  assert.equal(reviewStateGcAfterKey(persistedState), targetKeys[24]);
   assert.equal(saveCalls, 1);
-  assert.equal(reviewStateGcAfterKey(persistedState), null);
+  assert.ok(persistedState[closedKey]);
+
+  const second = await runPoll();
+  assert.equal(second.failed, true);
+  assert.equal(second.reviewed, 0);
+  assert.equal(second.failures[0].note, 'review state capacity reached');
+  assert.equal(gcKeys[MAX_STATE_GC_CHECKS_PER_POLL], closedKey);
+  assert.equal(persistedState[closedKey], undefined);
+  assert.equal(saveCalls, 2);
+
+  const third = await runPoll();
+  assert.equal(third.failed, false);
+  assert.equal(third.reviewed, 1);
+  assert.equal(third.outcomes[0].number, newNumber);
+  assert.equal(third.outcomes[0].status, 'reviewed');
+  assert.equal(unauthorizedProofCalls, 0);
+  assert.equal(selectedProofCalls, 0);
+  assert.equal(currentReconciliationCalls, 1);
+  assert.equal(postCalls, 1);
+  assert.equal(saveCalls, 3);
   assert.equal(
-    persistedState[prKey('owner/target', 1, target)].lastReviewedSha,
-    'target-sha-1',
+    persistedState[prKey('owner/target', newNumber, target)].lastReviewedSha,
+    `target-sha-${newNumber}`,
   );
   assert.equal(
     Object.keys(persistedState).filter((key) => key !== STATE_METADATA_KEY).length,
     MAX_REVIEW_STATE_ENTRIES,
   );
-  for (let number = 1; number <= deconfiguredEntries; number += 1) {
-    assert.ok(persistedState[prKey('owner/deconfigured', number, deconfigured)]);
-  }
-  for (let number = 1; number <= MAX_STATE_GC_CHECKS_PER_POLL; number += 1) {
-    assert.ok(persistedState[prKey('owner/unselected', number, unselected)]);
-  }
+  for (const key of ineligibleKeys) assert.ok(persistedState[key]);
 });
 
 test('marker-proof cursor reaches a later exact proof on the next poll without starving closure GC', async (t) => {
