@@ -1,12 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  lstat,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   candidateCursorFor,
   expireReviewState,
   loadState,
+  MAX_LEGACY_STATE_FILE_BYTES,
   migrateLegacyStateForReviewer,
   needsReview,
   normalizePrKey,
@@ -554,6 +565,38 @@ test('review-state load is byte-bounded before JSON parsing', async (t) => {
   );
 });
 
+test('bounded legacy load admits valid predecessor bytes for migration only', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const key = prKey('owner/repo', 1, reviewer);
+  const raw = JSON.stringify({
+    [key]: {
+      lastReviewedSha: 'sha-1',
+      lastReviewedAt: '2026-08-11T00:00:00.000Z',
+    },
+  }) + ' '.repeat(MAX_STATE_FILE_BYTES);
+  await writeFile(stateFile, raw);
+
+  await assert.rejects(
+    loadState(stateFile),
+    new RegExp(`file exceeds ${MAX_STATE_FILE_BYTES} bytes`, 'u'),
+  );
+  const migratable = await loadState(stateFile, {
+    allowEntryLimitMigration: true,
+  });
+  assert.equal(migratable[key].lastReviewedSha, 'sha-1');
+  await writeFile(
+    stateFile,
+    JSON.stringify({ [key]: migratable[key] }) +
+      ' '.repeat(MAX_LEGACY_STATE_FILE_BYTES),
+  );
+  await assert.rejects(
+    loadState(stateFile, { allowEntryLimitMigration: true }),
+    new RegExp(`file exceeds ${MAX_LEGACY_STATE_FILE_BYTES} bytes`, 'u'),
+  );
+});
+
 test('review-state entry count is bounded on load and save', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -605,11 +648,18 @@ test('serialized review state is byte-bounded before creating the target file', 
     saveState(stateFile, state),
     new RegExp(`serialized state exceeds ${MAX_STATE_FILE_BYTES} bytes`, 'u'),
   );
+  await saveState(stateFile, state, { allowEntryLimitMigration: true });
+  assert.ok((await stat(stateFile)).size > MAX_STATE_FILE_BYTES);
   await assert.rejects(
-    saveState(stateFile, state, { allowEntryLimitMigration: true }),
-    new RegExp(`serialized state exceeds ${MAX_STATE_FILE_BYTES} bytes`, 'u'),
+    loadState(stateFile),
+    new RegExp(`file exceeds ${MAX_STATE_FILE_BYTES} bytes`, 'u'),
   );
-  await assert.rejects(stat(stateFile), { code: 'ENOENT' });
+  assert.equal(
+    Object.keys(await loadState(stateFile, {
+      allowEntryLimitMigration: true,
+    })).length,
+    MAX_REVIEW_STATE_ENTRIES + 1,
+  );
 });
 
 test('review-state retention expires entries at exactly 365 days', () => {
@@ -761,13 +811,50 @@ test('permission hardening failure leaves the previous state committed', async (
 
   await assert.rejects(
     saveState(stateFile, replacement, {
-      enforceMode: async () => { throw new Error('chmod failed'); },
+      hardenHandle: async () => { throw new Error('chmod failed'); },
     }),
     /chmod failed/u,
   );
 
   assert.equal(await readFile(stateFile, 'utf8'), originalBytes);
   assert.deepEqual(await readdir(directory), ['state.json']);
+});
+
+test('temporary-path replacement cannot chmod a victim or replace state', {
+  skip: process.platform === 'win32',
+}, async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const victim = path.join(directory, 'victim.txt');
+  const initialState = {
+    [prKey('owner/repo', 1, reviewer)]: {
+      lastReviewedSha: 'sha-1',
+      lastReviewedAt: '2026-07-28T00:00:00.000Z',
+    },
+  };
+  await saveState(stateFile, initialState);
+  await writeFile(victim, 'victim', { mode: 0o644 });
+  await chmod(victim, 0o644);
+  const originalBytes = await readFile(stateFile, 'utf8');
+
+  await assert.rejects(
+    saveState(stateFile, {}, {
+      beforeRename: async (temporaryPath) => {
+        await rm(temporaryPath);
+        await symlink(victim, temporaryPath);
+      },
+    }),
+    /temporary file identity changed/u,
+  );
+
+  assert.equal(await readFile(stateFile, 'utf8'), originalBytes);
+  assert.equal((await lstat(stateFile)).isFile(), true);
+  assert.equal((await lstat(stateFile)).isSymbolicLink(), false);
+  assert.equal((await stat(stateFile)).mode & 0o777, 0o600);
+  assert.equal(await readFile(victim, 'utf8'), 'victim');
+  assert.equal((await stat(victim)).mode & 0o777, 0o644);
+  assert.deepEqual((await readdir(directory)).sort(), ['state.json', 'victim.txt']);
 });
 
 test('saving an absolute state path does not tighten its existing parent', {

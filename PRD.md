@@ -462,8 +462,10 @@ the original file untouched. Dry runs preserve their no-write guarantee, so
 downgrade after encountering that intermediate state requires one successful
 non-dry migration first.
 
-The file is read with a 16 MiB pre-parse bound and can contain at most 10,000
-review records. Scoped keys are canonical lowercase
+The file is ordinarily read with a 16 MiB pre-parse bound and can contain at
+most 10,000 review records. The explicit predecessor-capacity migration may
+read at most 32 MiB, then must atomically rewrite within the ordinary limits;
+larger files still fail before parsing. Scoped keys are canonical lowercase
 `HOST@USERNAME::owner/repo#N`; the only compatible legacy form is lowercase
 `owner/repo#N`, with case-only aliases normalized and one-account legacy state
 adopted before external work. Host, user, repository, and positive decimal PR
@@ -475,6 +477,8 @@ left untouched and fails before authentication or GitHub work.
 One legacy file containing more than 10,000 otherwise valid records can upgrade
 through deterministic 365-day expiry plus at most 1,000 authenticated PR-state
 checks per poll. Remote checks require valid config-wide AI-processing consent.
+Each repair lookup is capped at five seconds, the repair window at 15 seconds,
+and three failed or malformed responses stop that poll's remote repair work.
 An unsuccessful window is rotated byte-neutrally in the existing entry order so
 later windows are eventually inspected. Confirmed `CLOSED` or `MERGED` records
 accumulate across those atomic progress saves; other records are never pruned.

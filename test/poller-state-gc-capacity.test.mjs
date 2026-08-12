@@ -515,6 +515,131 @@ test('active legacy over-cap state rotates one bounded authenticated window', as
   for (const key of Object.keys(initialState)) assert.ok(persisted[key]);
 });
 
+test('legacy over-cap repair bounds systemic lookup failures and rotates them', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-upgrade-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const stateFile = path.join(root, 'state.json');
+  const initialState = legacyOverCapState();
+  await writeFile(stateFile, JSON.stringify(initialState));
+  const timeouts = [];
+  const dependencies = migrationDependencies();
+  dependencies.monotonicNow = () => 0;
+  dependencies.getPullRequestForStateGc = async ({ timeoutMs }) => {
+    timeouts.push(timeoutMs);
+    throw new Error('systemic transport failure');
+  };
+
+  const result = await pollOnce(migrationPollOptions(root, dependencies));
+
+  assert.equal(result.failed, true);
+  assert.equal(result.failures[0].note, 'legacy state capacity migration required');
+  assert.deepEqual(timeouts, [5_000, 5_000, 5_000]);
+  const persisted = JSON.parse(await readFile(stateFile, 'utf8'));
+  const persistedKeys = Object.keys(persisted)
+    .filter((key) => key !== STATE_METADATA_KEY);
+  assert.equal(persistedKeys.length, MAX_REVIEW_STATE_ENTRIES + 1);
+  assert.equal(persistedKeys[0], prKey('owner/repo', 4, account));
+  for (const key of Object.keys(initialState)) assert.ok(persisted[key]);
+});
+
+test('legacy over-cap repair stops at its wall-clock deadline', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-upgrade-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const stateFile = path.join(root, 'state.json');
+  await writeFile(stateFile, JSON.stringify(legacyOverCapState()));
+  const checks = [];
+  const monotonicTimes = [0, 0, 14_999, 15_000];
+  const dependencies = migrationDependencies();
+  dependencies.monotonicNow = () => monotonicTimes.shift() ?? 15_000;
+  dependencies.getPullRequestForStateGc = async ({ number, timeoutMs }) => {
+    checks.push({ number, timeoutMs });
+    return {
+      headRefOid: `sha-${number}`,
+      number,
+      title: 'Tracked PR',
+      url: `https://github.com/owner/repo/pull/${number}`,
+      body: '',
+      state: 'OPEN',
+    };
+  };
+
+  const result = await pollOnce(migrationPollOptions(root, dependencies));
+
+  assert.equal(result.failed, true);
+  assert.deepEqual(checks, [
+    { number: 1, timeoutMs: 5_000 },
+    { number: 2, timeoutMs: 1 },
+  ]);
+  const persisted = JSON.parse(await readFile(stateFile, 'utf8'));
+  assert.equal(Object.keys(persisted)[0], prKey('owner/repo', 3, account));
+});
+
+test('legacy over-cap deadline also aborts a queued lookup wait', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-upgrade-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const stateFile = path.join(root, 'state.json');
+  await writeFile(stateFile, JSON.stringify(legacyOverCapState()));
+  const dependencies = migrationDependencies();
+  const monotonicTimes = [0, 14_999, 15_000];
+  dependencies.monotonicNow = () => monotonicTimes.shift() ?? 15_000;
+  let remoteCalls = 0;
+  dependencies.getPullRequestForStateGc = async () => {
+    remoteCalls += 1;
+    throw new Error('must remain queued');
+  };
+  dependencies.createGitHubMutationQueue = () => ({
+    run: async (operation, { signal } = {}) => {
+      if (!signal) return operation();
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(resolve, 100);
+        signal.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(signal.reason);
+        }, { once: true });
+      });
+      return operation();
+    },
+  });
+
+  const result = await pollOnce(migrationPollOptions(root, dependencies));
+
+  assert.equal(result.failed, true);
+  assert.equal(remoteCalls, 0);
+  const persisted = JSON.parse(await readFile(stateFile, 'utf8'));
+  assert.equal(Object.keys(persisted)[0], prKey('owner/repo', 2, account));
+});
+
+test('oversized predecessor state reaches bounded capacity repair', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-upgrade-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const stateFile = path.join(root, 'state.json');
+  const initialState = legacyOverCapState();
+  const raw = JSON.stringify(initialState) + ' '.repeat(MAX_STATE_FILE_BYTES);
+  assert.ok(Buffer.byteLength(raw) > MAX_STATE_FILE_BYTES);
+  await writeFile(stateFile, raw);
+  const dependencies = migrationDependencies();
+  dependencies.getPullRequestForStateGc = async ({ repo, number }) => ({
+    headRefOid: `sha-${number}`,
+    number,
+    title: 'Tracked PR',
+    url: `https://github.com/${repo}/pull/${number}`,
+    body: '',
+    state: number === 1 ? 'CLOSED' : 'OPEN',
+  });
+
+  const result = await pollOnce(migrationPollOptions(root, dependencies));
+
+  assert.equal(result.failed, false);
+  const repairedBytes = await readFile(stateFile);
+  assert.ok(repairedBytes.byteLength < MAX_STATE_FILE_BYTES);
+  const repaired = JSON.parse(repairedBytes.toString('utf8'));
+  assert.equal(repaired[prKey('owner/repo', 1, account)], undefined);
+  assert.equal(
+    Object.keys(repaired).filter((key) => key !== STATE_METADATA_KEY).length,
+    MAX_REVIEW_STATE_ENTRIES,
+  );
+});
+
 test('legacy over-cap repair accumulates closed entries across windows', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-upgrade-'));
   t.after(() => rm(root, { recursive: true, force: true }));
