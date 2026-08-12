@@ -7,6 +7,7 @@ import { createAiProcessingConsent } from '../lib/ai-processing-consent.mjs';
 import { pollOnce } from '../lib/poller.mjs';
 import { MAX_STATE_FILE_BYTES } from '../lib/security-limits.mjs';
 import { prKey, serializeState } from '../lib/state.mjs';
+import { LARGE_STATE_TEST_TIMEOUT_MS } from './test-partitions.mjs';
 
 const validatedSearchResults = new WeakSet();
 
@@ -16,7 +17,7 @@ function completeSearch(candidates) {
 }
 
 test('near-32-MiB compact predecessor persists byte-neutral repair progress', {
-  timeout: 30_000,
+  timeout: LARGE_STATE_TEST_TIMEOUT_MS,
 }, async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-upgrade-'));
   t.after(() => rm(root, { recursive: true, force: true }));
