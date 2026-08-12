@@ -20,6 +20,9 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
 - Bounded review state to 10,000 records and 16 MiB, added canonical field
   validation and safe new-key capacity reservations, and introduced exact
   365-day expiry plus a deterministic 25-record-per-poll scoped closure sweep.
+- Hardened state reads and atomic replacement against symlink, shared-parent,
+  parent-replacement, and cleanup races. Legacy over-cap repair now applies one
+  end-to-end deadline and incrementally projects confirmed closure reclamation.
 - Accepted valid human and unrelated `[bot]` requested-reviewer actors while
   failing malformed or mistyped actor rows closed. Hardened state canonicality,
   future timestamps, and marker-version proof; moved exact UTF-8 entry/byte

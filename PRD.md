@@ -475,16 +475,23 @@ future, and optionally carry only `reviewMarkerVersion: 1`. Invalid state is
 left untouched and fails before authentication or GitHub work.
 
 Atomic state replacement requires a non-symlink parent directory owned by the
-current user and private on POSIX. The writer retains handles for that directory
-and the private temporary file, backs up an existing regular target, and verifies
-the committed target against the held file identity before deleting the backup.
-Any substitution restores the prior target and fails closed.
+current user and private on POSIX. Reads validate that parent and a regular,
+non-symlink state file through held handles, and permission hardening uses the
+verified file handle before parsing. Writes retain handles for the directory and
+private temporary file, revalidate both identities, then perform one atomic
+temporary-to-target replacement as the commit operation. The prior target is
+never moved aside first, so a failed pre-commit step leaves it in place; unsafe
+temporary cleanup is surfaced instead of deleting through a replaced parent.
 
 One legacy file containing more than 10,000 otherwise valid records can upgrade
 through deterministic 365-day expiry plus at most 1,000 authenticated PR-state
 checks per poll. Remote checks require valid config-wide AI-processing consent.
 Each repair lookup is capped at five seconds, the repair window at 15 seconds,
 and three failed or malformed responses stop that poll's remote repair work.
+Authentication is scheduled in bounded batches only while the same end-to-end
+repair deadline remains live. Confirmed-deletion capacity is projected with
+incremental exact entry and UTF-8 byte accounting rather than repeatedly
+serializing the full legacy state.
 An unsuccessful window is rotated byte-neutrally in the existing entry order so
 later windows are eventually inspected. Confirmed `CLOSED` or `MERGED` records
 accumulate across those atomic progress saves; other records are never pruned.

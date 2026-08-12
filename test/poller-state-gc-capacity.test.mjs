@@ -42,6 +42,7 @@ function padStateNearByteLimit(state, targetBytes) {
       candidateCursors: Object.fromEntries(rows.slice(0, middle)),
     };
     const bytes = serializeState(state, {
+      enforceEntryLimit: false,
       enforceByteLimit: false,
     }).serializedBytes;
     if (bytes <= targetBytes) low = middle;
@@ -56,6 +57,7 @@ function padStateNearByteLimit(state, targetBytes) {
     cursors[`z-${'\0'.repeat(middle)}`] = 0;
     state[STATE_METADATA_KEY] = { version: 1, candidateCursors: cursors };
     const bytes = serializeState(state, {
+      enforceEntryLimit: false,
       enforceByteLimit: false,
     }).serializedBytes;
     delete cursors[`z-${'\0'.repeat(middle)}`];
@@ -64,7 +66,9 @@ function padStateNearByteLimit(state, targetBytes) {
   }
   if (paddingLow > 0) cursors[`z-${'\0'.repeat(paddingLow)}`] = 0;
   state[STATE_METADATA_KEY] = { version: 1, candidateCursors: cursors };
-  return serializeState(state).serializedBytes;
+  return serializeState(state, {
+    enforceEntryLimit: false,
+  }).serializedBytes;
 }
 
 function capacityState(entryCount, { stateAccount, repo, shaFor }) {
@@ -637,12 +641,9 @@ test('legacy over-cap repair stops at its wall-clock deadline', async (t) => {
   const result = await pollOnce(migrationPollOptions(root, dependencies));
 
   assert.equal(result.failed, true);
-  assert.deepEqual(checks, [
-    { number: 1, timeoutMs: 5_000 },
-    { number: 2, timeoutMs: 1 },
-  ]);
+  assert.deepEqual(checks, [{ number: 1, timeoutMs: 1 }]);
   const persisted = JSON.parse(await readFile(stateFile, 'utf8'));
-  assert.equal(Object.keys(persisted)[0], prKey('owner/repo', 3, account));
+  assert.equal(Object.keys(persisted)[0], prKey('owner/repo', 2, account));
 });
 
 test('legacy over-cap deadline also aborts a queued authentication wait', async (t) => {
@@ -711,6 +712,56 @@ test('oversized predecessor state reaches bounded capacity repair', async (t) =>
     Object.keys(repaired).filter((key) => key !== STATE_METADATA_KEY).length,
     MAX_REVIEW_STATE_ENTRIES,
   );
+});
+
+test('many closed entries near the legacy byte ceiling use incremental repair projection', {
+  timeout: 5_000,
+}, async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-upgrade-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const stateFile = path.join(root, 'state.json');
+  const entryCount = MAX_REVIEW_STATE_ENTRIES + 501;
+  const initialState = Object.fromEntries(
+    Array.from({ length: entryCount }, (_, index) => [
+      prKey('owner/repo', index + 1, account),
+      {
+        lastReviewedSha: `sha-${index + 1}`,
+        lastReviewedAt: '2026-08-11T00:00:00.000Z',
+      },
+    ]),
+  );
+  padStateNearByteLimit(initialState, MAX_STATE_FILE_BYTES);
+  const serialized = serializeState(initialState, {
+    enforceEntryLimit: false,
+    enforceByteLimit: false,
+  }).serialized;
+  assert.ok(Buffer.byteLength(serialized) <= MAX_STATE_FILE_BYTES);
+  await writeFile(stateFile, serialized);
+  let closureChecks = 0;
+  const dependencies = migrationDependencies();
+  dependencies.getPullRequestForStateGc = async ({ repo, number }) => {
+    closureChecks += 1;
+    return {
+      headRefOid: `sha-${number}`,
+      number,
+      title: 'Tracked PR',
+      url: `https://github.com/${repo}/pull/${number}`,
+      body: '',
+      state: 'CLOSED',
+    };
+  };
+
+  const result = await pollOnce(migrationPollOptions(root, dependencies));
+
+  assert.equal(result.failed, false);
+  assert.ok(closureChecks > 501);
+  assert.ok(closureChecks <= 1_000);
+  const repaired = JSON.parse(await readFile(stateFile, 'utf8'));
+  assert.equal(
+    Object.keys(repaired).filter((key) => key !== STATE_METADATA_KEY).length,
+    entryCount - closureChecks,
+  );
+  assert.ok(entryCount - closureChecks <= MAX_REVIEW_STATE_ENTRIES);
 });
 
 test('legacy over-cap repair accumulates closed entries across windows', async (t) => {

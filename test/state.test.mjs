@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import {
   chmod,
   lstat,
+  mkdir,
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   symlink,
@@ -519,7 +521,7 @@ test('review state accepts only canonical identifiers and optional marker versio
   }
 });
 
-test('invalid state is rejected before permission hardening', {
+test('invalid state is hardened through its verified handle before rejection', {
   skip: process.platform === 'win32',
 }, async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
@@ -534,7 +536,76 @@ test('invalid state is rejected before permission hardening', {
   await chmod(stateFile, 0o644);
 
   await assert.rejects(loadState(stateFile), /Invalid review state entry/u);
+  assert.equal((await stat(stateFile)).mode & 0o777, 0o600);
+});
+
+test('loading a symlink state never reads or chmods its target', {
+  skip: process.platform === 'win32',
+}, async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const victim = path.join(directory, 'victim.json');
+  await writeFile(victim, '{}\n', { mode: 0o644 });
+  await chmod(victim, 0o644);
+  await symlink(victim, stateFile);
+
+  await assert.rejects(
+    loadState(stateFile),
+    /regular non-symbolic-link file|ELOOP/u,
+  );
+
+  assert.equal(await readFile(victim, 'utf8'), '{}\n');
+  assert.equal((await stat(victim)).mode & 0o777, 0o644);
+  assert.equal((await lstat(stateFile)).isSymbolicLink(), true);
+});
+
+test('loading state from a shared parent fails before touching the file', {
+  skip: process.platform === 'win32',
+}, async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  await writeFile(stateFile, '{}\n', { mode: 0o644 });
+  await chmod(stateFile, 0o644);
+  await chmod(directory, 0o755);
+
+  await assert.rejects(
+    loadState(stateFile),
+    /parent directory must be private and user-owned/u,
+  );
+
+  assert.equal(await readFile(stateFile, 'utf8'), '{}\n');
   assert.equal((await stat(stateFile)).mode & 0o777, 0o644);
+});
+
+test('parent replacement while loading fails closed instead of returning empty state', {
+  skip: process.platform === 'win32',
+}, async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-load-parent-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const directory = path.join(root, 'private');
+  const movedDirectory = path.join(root, 'private-moved');
+  await mkdir(directory, { mode: 0o700 });
+  const stateFile = path.join(directory, 'state.json');
+  await writeFile(stateFile, '{}\n', { mode: 0o600 });
+
+  await assert.rejects(
+    loadState(stateFile, {
+      hardenHandle: async () => {
+        await rename(directory, movedDirectory);
+        await mkdir(directory, { mode: 0o700 });
+        await writeFile(stateFile, '{"replacement":true}\n', { mode: 0o600 });
+      },
+    }),
+    /parent directory identity changed/u,
+  );
+
+  assert.equal(await readFile(stateFile, 'utf8'), '{"replacement":true}\n');
+  assert.equal(
+    await readFile(path.join(movedDirectory, 'state.json'), 'utf8'),
+    '{}\n',
+  );
 });
 
 test('shared serialization reports exact UTF-8 bytes', () => {
@@ -879,13 +950,136 @@ test('post-check substitution cannot commit attacker content', {
         await writeFile(temporaryPath, '{"attacker":true}\n');
       },
     }),
-    /temporary file identity changed during commit/u,
+    /temporary file identity changed before atomic commit/u,
   );
 
   assert.equal(await readFile(stateFile, 'utf8'), originalBytes);
   assert.equal((await lstat(stateFile)).isFile(), true);
   assert.equal((await lstat(stateFile)).isSymbolicLink(), false);
   assert.deepEqual(await readdir(directory), ['state.json']);
+});
+
+test('atomic replacement failure preserves the previous state without backup recovery', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const initialState = {
+    [prKey('owner/repo', 1, reviewer)]: {
+      lastReviewedSha: 'sha-1',
+      lastReviewedAt: '2026-07-28T00:00:00.000Z',
+    },
+  };
+  await saveState(stateFile, initialState);
+  const originalBytes = await readFile(stateFile, 'utf8');
+
+  await assert.rejects(
+    saveState(stateFile, {}, {
+      commitRename: async () => { throw new Error('simulated commit failure'); },
+    }),
+    /simulated commit failure/u,
+  );
+
+  assert.equal(await readFile(stateFile, 'utf8'), originalBytes);
+  assert.deepEqual(await readdir(directory), ['state.json']);
+});
+
+test('temporary flush failure leaves the previous state committed', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const initialState = {
+    [prKey('owner/repo', 1, reviewer)]: {
+      lastReviewedSha: 'sha-1',
+      lastReviewedAt: '2026-07-28T00:00:00.000Z',
+    },
+  };
+  await saveState(stateFile, initialState);
+  const originalBytes = await readFile(stateFile, 'utf8');
+
+  await assert.rejects(
+    saveState(stateFile, {}, {
+      flushHandle: async () => { throw new Error('simulated flush failure'); },
+    }),
+    /simulated flush failure/u,
+  );
+
+  assert.equal(await readFile(stateFile, 'utf8'), originalBytes);
+  assert.deepEqual(await readdir(directory), ['state.json']);
+});
+
+test('temporary cleanup failure is surfaced without deleting the previous state', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const initialState = {
+    [prKey('owner/repo', 1, reviewer)]: {
+      lastReviewedSha: 'sha-1',
+      lastReviewedAt: '2026-07-28T00:00:00.000Z',
+    },
+  };
+  await saveState(stateFile, initialState);
+  const originalBytes = await readFile(stateFile, 'utf8');
+
+  await assert.rejects(
+    saveState(stateFile, {}, {
+      commitRename: async () => { throw new Error('simulated commit failure'); },
+      removeTemporary: async () => { throw new Error('simulated cleanup failure'); },
+    }),
+    /simulated commit failure.*temporary cleanup also failed.*simulated cleanup failure/u,
+  );
+
+  assert.equal(await readFile(stateFile, 'utf8'), originalBytes);
+  assert.equal(
+    (await readdir(directory)).some((name) => name.includes('.tmp-')),
+    true,
+  );
+});
+
+test('parent replacement after verification cannot redirect commit or cleanup', {
+  skip: process.platform === 'win32',
+}, async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-parent-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const directory = path.join(root, 'private');
+  const movedDirectory = path.join(root, 'private-moved');
+  await mkdir(directory, { mode: 0o700 });
+  const stateFile = path.join(directory, 'state.json');
+  const initialState = {
+    [prKey('owner/repo', 1, reviewer)]: {
+      lastReviewedSha: 'sha-1',
+      lastReviewedAt: '2026-07-28T00:00:00.000Z',
+    },
+  };
+  await saveState(stateFile, initialState);
+  const originalBytes = await readFile(stateFile, 'utf8');
+  let replacementTemporaryPath;
+
+  await assert.rejects(
+    saveState(stateFile, {}, {
+      afterIdentityCheck: async (temporaryPath) => {
+        await rename(directory, movedDirectory);
+        await mkdir(directory, { mode: 0o700 });
+        await writeFile(stateFile, 'replacement-target\n');
+        replacementTemporaryPath = path.join(
+          directory,
+          path.basename(temporaryPath),
+        );
+        await writeFile(replacementTemporaryPath, 'replacement-temp\n');
+      },
+    }),
+    /temporary file identity changed.*temporary cleanup also failed.*parent directory identity changed/u,
+  );
+
+  assert.equal(await readFile(stateFile, 'utf8'), 'replacement-target\n');
+  assert.equal(await readFile(replacementTemporaryPath, 'utf8'), 'replacement-temp\n');
+  assert.equal(
+    await readFile(path.join(movedDirectory, 'state.json'), 'utf8'),
+    originalBytes,
+  );
+
+  await rm(directory, { recursive: true, force: true });
+  await rename(movedDirectory, directory);
+  assert.deepEqual(await loadState(stateFile), initialState);
 });
 
 test('saving rejects an unsafe existing parent without tightening it', {
