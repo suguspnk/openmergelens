@@ -15,15 +15,18 @@ import {
   createGitHubMutationQueue,
 } from '../lib/github-mutation-queue.mjs';
 import {
+  MAX_CONFIGURED_REVIEW_SCOPES,
   MAX_CONCURRENT_REVIEW_ADMISSIONS,
   MAX_REVIEW_STATE_ENTRIES,
   MAX_REVIEWS_PER_POLL,
   MAX_STATE_GC_CHECKS_PER_POLL,
+  MAX_STATE_FILE_BYTES,
 } from '../lib/security-limits.mjs';
 import { MAX_CANDIDATE_METADATA_PER_POLL } from '../lib/poller.mjs';
 import {
   prKey,
   saveState,
+  serializeState,
   STATE_METADATA_KEY,
 } from '../lib/state.mjs';
 import { createAiProcessingConsent } from '../lib/ai-processing-consent.mjs';
@@ -118,6 +121,39 @@ async function fixture(t) {
     defaultReviewPromptPath: path.join(root, 'template.md'),
   };
 }
+
+test('configured scope universe is bounded before state or external work', async (t) => {
+  const files = await fixture(t);
+  const repositories = Array.from(
+    { length: MAX_CONFIGURED_REVIEW_SCOPES + 1 },
+    (_, index) => `owner/repo-${index}`,
+  );
+  let loadCalls = 0;
+  let authCalls = 0;
+
+  await assert.rejects(
+    pollOnce({
+      config: {
+        ...config([work]),
+        githubAccounts: [{ ...work, repositories }],
+      },
+      ...files,
+      dependencies: {
+        loadState: async () => {
+          loadCalls += 1;
+          return {};
+        },
+        resolveGitHubAuth: async () => {
+          authCalls += 1;
+          return {};
+        },
+      },
+    }),
+    new RegExp(`exceeds ${MAX_CONFIGURED_REVIEW_SCOPES} configured review scopes`, 'u'),
+  );
+  assert.equal(loadCalls, 0);
+  assert.equal(authCalls, 0);
+});
 
 function successfulDependencies(events) {
   return {
@@ -293,6 +329,8 @@ test('two requested accounts independently review and persist the same PR', asyn
     'github.com@personal::owner/repo#7',
     'github.com@work::owner/repo#7',
   ]);
+  assert.equal(state['github.com@personal::owner/repo#7'].reviewMarkerVersion, 1);
+  assert.equal(state['github.com@work::owner/repo#7'].reviewMarkerVersion, 1);
 });
 
 for (const [label, malformedMetadata] of [
@@ -442,6 +480,40 @@ test('pollOnce rolls back legacy adoption when migration persistence fails', asy
   );
   assert.deepEqual(events.filter((event) => event.startsWith('post:')), []);
   assert.deepEqual(JSON.parse(await readFile(files.stateFile, 'utf8')), initialState);
+});
+
+test('invalid legacy state fails before authentication and remains untouched', async (t) => {
+  const files = await fixture(t);
+  const invalidState = JSON.stringify({
+    'owner/repo#01': {
+      lastReviewedSha: 'sha-1',
+      lastReviewedAt: '2026-08-11T23:59:59.999Z',
+    },
+  });
+  await writeFile(files.stateFile, invalidState);
+  let authCalls = 0;
+  let searchCalls = 0;
+  const dependencies = successfulDependencies([]);
+  dependencies.resolveGitHubAuth = async () => {
+    authCalls += 1;
+    return { ...work, token: 'token' };
+  };
+  dependencies.searchReviewRequestedPRs = async () => {
+    searchCalls += 1;
+    return completeSearch([]);
+  };
+
+  await assert.rejects(
+    pollOnce({
+      config: config([work]),
+      ...files,
+      dependencies,
+    }),
+    /Invalid review state entry/u,
+  );
+  assert.equal(authCalls, 0);
+  assert.equal(searchCalls, 0);
+  assert.equal(await readFile(files.stateFile, 'utf8'), invalidState);
 });
 
 test('pollOnce retains ambiguous unscoped state across multiple selected accounts', async (t) => {
@@ -4080,16 +4152,64 @@ test('retention expiry rolls back and stops before external work when saving fai
   );
 });
 
-function capacityState(entryCount) {
+function capacityState(
+  entryCount,
+  {
+    account = work,
+    repo = 'owner/repo',
+    marker = false,
+    shaFor = (number) => `old-${number}`,
+  } = {},
+) {
   return Object.fromEntries(
     Array.from({ length: entryCount }, (_, index) => [
-      prKey('owner/repo', index + 1, work),
+      prKey(repo, index + 1, account),
       {
-        lastReviewedSha: `old-${index + 1}`,
+        lastReviewedSha: shaFor(index + 1),
         lastReviewedAt: '2026-08-05T00:00:00.000Z',
+        ...(marker ? { reviewMarkerVersion: 1 } : {}),
       },
     ]),
   );
+}
+
+function padStateNearByteLimit(state, targetBytes = MAX_STATE_FILE_BYTES - 1) {
+  const rows = Array.from({ length: MAX_REVIEW_STATE_ENTRIES }, (_, index) => [
+    `${String(index).padStart(5, '0')}-${'\0'.repeat(500)}`,
+    index,
+  ]);
+  let low = 0;
+  let high = rows.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    state[STATE_METADATA_KEY] = {
+      version: 1,
+      candidateCursors: Object.fromEntries(rows.slice(0, middle)),
+    };
+    const bytes = serializeState(state, {
+      enforceByteLimit: false,
+    }).serializedBytes;
+    if (bytes <= targetBytes) low = middle;
+    else high = middle - 1;
+  }
+
+  const cursors = Object.fromEntries(rows.slice(0, low));
+  let paddingLow = 0;
+  let paddingHigh = 498;
+  while (paddingLow < paddingHigh) {
+    const middle = Math.ceil((paddingLow + paddingHigh) / 2);
+    cursors[`z-${'\0'.repeat(middle)}`] = 0;
+    state[STATE_METADATA_KEY] = { version: 1, candidateCursors: cursors };
+    const bytes = serializeState(state, {
+      enforceByteLimit: false,
+    }).serializedBytes;
+    delete cursors[`z-${'\0'.repeat(middle)}`];
+    if (bytes <= targetBytes) paddingLow = middle;
+    else paddingHigh = middle - 1;
+  }
+  if (paddingLow > 0) cursors[`z-${'\0'.repeat(paddingLow)}`] = 0;
+  state[STATE_METADATA_KEY] = { version: 1, candidateCursors: cursors };
+  return serializeState(state).serializedBytes;
 }
 
 test('state capacity fails before posting a new key but permits an existing-key update', async (t) => {
@@ -4125,7 +4245,10 @@ test('state capacity fails before posting a new key but permits an existing-key 
   assert.equal(blocked.failed, true);
   assert.equal(blocked.failures.at(-1).note, 'review state capacity reached');
   assert.equal(postCalls, 0);
-  assert.equal(lastSaved[prKey('owner/repo', MAX_REVIEW_STATE_ENTRIES + 1, work)], undefined);
+  assert.equal(
+    lastSaved?.[prKey('owner/repo', MAX_REVIEW_STATE_ENTRIES + 1, work)],
+    undefined,
+  );
 
   dependencies.searchReviewRequestedPRs = async () => completeSearch([{
     repo: 'owner/repo',
@@ -4228,6 +4351,498 @@ test('a failed post releases its new-key reservation for a later candidate', asy
     Object.keys(lastSaved).filter((key) => key !== STATE_METADATA_KEY).length,
     MAX_REVIEW_STATE_ENTRIES,
   );
+});
+
+test('entry-pressure admission borrows unused capacity from a proven donor', async (t) => {
+  const files = await fixture(t);
+  const donor = { ...work, repositories: ['owner/repo'] };
+  const target = { ...personal, repositories: ['other/repo'] };
+  const fullState = capacityState(MAX_REVIEW_STATE_ENTRIES, {
+    account: donor,
+    marker: true,
+  });
+  let lastSaved;
+  let diffCalls = 0;
+  const dependencies = successfulDependencies([]);
+  dependencies.loadState = async () => fullState;
+  dependencies.saveState = async (_path, nextState) => {
+    lastSaved = structuredClone(nextState);
+  };
+  dependencies.searchReviewRequestedPRs = async ({ repo }) => completeSearch(
+    repo === 'other/repo' ? [{ repo, number: 1 }] : [],
+  );
+  dependencies.getPullRequest = async ({ repo, number }) => ({
+    headRefOid: 'target-sha',
+    number,
+    title: 'Target PR',
+    url: `https://github.com/${repo}/pull/${number}`,
+    body: '',
+    state: 'OPEN',
+  });
+  dependencies.getPullRequestDiff = async () => {
+    diffCalls += 1;
+    return '@@ -0,0 +1 @@\n+line\n';
+  };
+
+  const result = await pollOnce({
+    config: config([donor, target]),
+    accountSelector: { hostname: target.hostname, username: target.username },
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, false);
+  assert.equal(result.outcomes[0].status, 'reviewed');
+  assert.equal(diffCalls, 1);
+  assert.equal(lastSaved[prKey('owner/repo', 1, donor)], undefined);
+  assert.ok(lastSaved[prKey('owner/repo', 2, donor)]);
+  assert.equal(lastSaved[prKey('other/repo', 1, target)].reviewMarkerVersion, 1);
+  assert.equal(
+    Object.keys(lastSaved).filter((key) => key !== STATE_METADATA_KEY).length,
+    MAX_REVIEW_STATE_ENTRIES,
+  );
+});
+
+test('deconfigured proven scopes have zero protected capacity share', async (t) => {
+  const files = await fixture(t);
+  const deconfigured = { ...work, repositories: ['owner/repo'] };
+  const target = { ...personal, repositories: ['other/repo'] };
+  const fullState = capacityState(MAX_REVIEW_STATE_ENTRIES, {
+    account: deconfigured,
+    marker: true,
+  });
+  let lastSaved;
+  const dependencies = successfulDependencies([]);
+  dependencies.loadState = async () => fullState;
+  dependencies.saveState = async (_path, nextState) => {
+    lastSaved = structuredClone(nextState);
+  };
+  dependencies.searchReviewRequestedPRs = async ({ repo }) =>
+    completeSearch([{ repo, number: 1 }]);
+  dependencies.getPullRequest = async ({ repo, number }) => ({
+    headRefOid: 'target-sha',
+    number,
+    title: 'Target PR',
+    url: `https://github.com/${repo}/pull/${number}`,
+    body: '',
+    state: 'OPEN',
+  });
+
+  const result = await pollOnce({
+    config: config([target]),
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, false);
+  assert.equal(lastSaved[prKey('owner/repo', 1, deconfigured)], undefined);
+  assert.ok(lastSaved[prKey('other/repo', 1, target)]);
+});
+
+test('entry-pressure reclaim preserves another configured scope floor', async (t) => {
+  const files = await fixture(t);
+  const first = { ...work, repositories: ['owner/first'] };
+  const second = { ...personal, repositories: ['owner/second'] };
+  const state = {
+    ...capacityState(MAX_REVIEW_STATE_ENTRIES / 2, {
+      account: first,
+      repo: 'owner/first',
+      marker: true,
+    }),
+    ...capacityState(MAX_REVIEW_STATE_ENTRIES / 2, {
+      account: second,
+      repo: 'owner/second',
+      marker: true,
+    }),
+  };
+  let lastSaved;
+  const dependencies = successfulDependencies([]);
+  dependencies.loadState = async () => state;
+  dependencies.saveState = async (_path, nextState) => {
+    lastSaved = structuredClone(nextState);
+  };
+  dependencies.searchReviewRequestedPRs = async ({ repo }) => completeSearch([{
+    repo,
+    number: MAX_REVIEW_STATE_ENTRIES / 2 + 1,
+  }]);
+  dependencies.getPullRequest = async ({ repo, number }) => ({
+    headRefOid: 'next-sha',
+    number,
+    title: 'Next PR',
+    url: `https://github.com/${repo}/pull/${number}`,
+    body: '',
+    state: 'OPEN',
+  });
+
+  const result = await pollOnce({
+    config: config([first, second]),
+    accountSelector: { hostname: first.hostname, username: first.username },
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, false);
+  assert.equal(lastSaved[prKey('owner/first', 1, first)], undefined);
+  assert.ok(lastSaved[prKey('owner/second', 1, second)]);
+  assert.ok(lastSaved[prKey(
+    'owner/first',
+    MAX_REVIEW_STATE_ENTRIES / 2 + 1,
+    first,
+  )]);
+});
+
+test('simultaneous pressure never crosses either configured scope floor', async (t) => {
+  const files = await fixture(t);
+  const donor = { ...work, repositories: ['owner/repo'] };
+  const target = { ...personal, repositories: ['other/repo'] };
+  const state = capacityState(MAX_REVIEW_STATE_ENTRIES, {
+    account: donor,
+    marker: true,
+    shaFor: () => 's',
+  });
+  const byteFloor = Math.floor(MAX_STATE_FILE_BYTES / 2);
+  let scopeBytes = Object.entries(state).reduce(
+    (total, [key, entry]) => total + Buffer.byteLength(
+      JSON.stringify([key, entry]),
+      'utf8',
+    ),
+    0,
+  );
+  for (const [key, entry] of Object.entries(state)) {
+    const originalBytes = Buffer.byteLength(JSON.stringify([key, entry]), 'utf8');
+    const fullEntry = { ...entry, lastReviewedSha: '\0'.repeat(128) };
+    const fullBytes = Buffer.byteLength(JSON.stringify([key, fullEntry]), 'utf8');
+    if (scopeBytes + fullBytes - originalBytes <= byteFloor) {
+      state[key] = fullEntry;
+      scopeBytes += fullBytes - originalBytes;
+      continue;
+    }
+    for (let length = 1; length <= 128; length += 1) {
+      const partialEntry = { ...entry, lastReviewedSha: '\0'.repeat(length) };
+      const partialBytes = Buffer.byteLength(
+        JSON.stringify([key, partialEntry]),
+        'utf8',
+      );
+      if (scopeBytes + partialBytes - originalBytes > byteFloor) {
+        state[key] = partialEntry;
+        scopeBytes += partialBytes - originalBytes;
+        break;
+      }
+    }
+    break;
+  }
+  const smallestEntryBytes = Math.min(
+    ...Object.entries(state).map(([key, entry]) =>
+      Buffer.byteLength(JSON.stringify([key, entry]), 'utf8')),
+  );
+  assert.ok(scopeBytes > byteFloor);
+  assert.ok(scopeBytes - byteFloor < smallestEntryBytes);
+  padStateNearByteLimit(state);
+
+  let diffCalls = 0;
+  let reviewerCalls = 0;
+  let postCalls = 0;
+  const dependencies = successfulDependencies([]);
+  dependencies.loadState = async () => state;
+  dependencies.searchReviewRequestedPRs = async ({ repo }) => completeSearch(
+    repo === 'other/repo' ? [{ repo, number: 1 }] : [],
+  );
+  dependencies.getPullRequest = async ({ repo, number }) => ({
+    headRefOid: 'target-sha',
+    number,
+    title: 'Target PR',
+    url: `https://github.com/${repo}/pull/${number}`,
+    body: '',
+    state: 'OPEN',
+  });
+  dependencies.getPullRequestDiff = async () => {
+    diffCalls += 1;
+    return '';
+  };
+  dependencies.invokeMultiPassReview = async () => {
+    reviewerCalls += 1;
+    return { summary: 'reviewed', findings: [] };
+  };
+  dependencies.postReview = async () => {
+    postCalls += 1;
+  };
+
+  const result = await pollOnce({
+    config: config([donor, target]),
+    accountSelector: { hostname: target.hostname, username: target.username },
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, true);
+  assert.equal(result.failures[0].note, 'review state capacity reached');
+  assert.equal(diffCalls, 0);
+  assert.equal(reviewerCalls, 0);
+  assert.equal(postCalls, 0);
+});
+
+for (const [label, entryCount] of [
+  ['byte-only', MAX_REVIEW_STATE_ENTRIES - 1],
+  ['entry-and-byte', MAX_REVIEW_STATE_ENTRIES],
+]) {
+  test(`${label} pressure uses exact UTF-8 admission and byte-share reclaim`, async (t) => {
+    const files = await fixture(t);
+    const donor = { ...work, repositories: ['owner/repo'] };
+    const target = { ...personal, repositories: ['other/repo'] };
+    const state = capacityState(entryCount, {
+      account: donor,
+      marker: true,
+      shaFor: () => '\0'.repeat(128),
+    });
+    const initialBytes = padStateNearByteLimit(state);
+    let lastSaved;
+    const dependencies = successfulDependencies([]);
+    dependencies.loadState = async () => state;
+    dependencies.saveState = async (_path, nextState) => {
+      lastSaved = structuredClone(nextState);
+    };
+    dependencies.searchReviewRequestedPRs = async ({ repo }) =>
+      completeSearch([{ repo, number: 1 }]);
+    dependencies.getPullRequest = async ({ repo, number }) => ({
+      headRefOid: '€'.repeat(128),
+      number,
+      title: 'Unicode target',
+      url: `https://github.com/${repo}/pull/${number}`,
+      body: '',
+      state: 'OPEN',
+    });
+
+    const result = await pollOnce({
+      config: config([donor, target]),
+      accountSelector: { hostname: target.hostname, username: target.username },
+      ...files,
+      dependencies,
+    });
+
+    assert.ok(initialBytes <= MAX_STATE_FILE_BYTES);
+    assert.equal(result.failed, false);
+    assert.equal(lastSaved[prKey('owner/repo', 1, donor)], undefined);
+    assert.equal(
+      lastSaved[prKey('other/repo', 1, target)].lastReviewedSha,
+      '€'.repeat(128),
+    );
+    const persisted = serializeState(lastSaved);
+    assert.ok(persisted.serializedBytes <= MAX_STATE_FILE_BYTES);
+    assert.equal(
+      Object.keys(lastSaved).filter((key) => key !== STATE_METADATA_KEY).length,
+      entryCount,
+    );
+  });
+}
+
+test('unproven capacity donors are retained when marker proof is absent', async (t) => {
+  const files = await fixture(t);
+  const donor = { ...work, repositories: ['owner/repo'] };
+  const target = { ...personal, repositories: ['other/repo'] };
+  const fullState = capacityState(MAX_REVIEW_STATE_ENTRIES, { account: donor });
+  let proofCalls = 0;
+  let diffCalls = 0;
+  let reviewerCalls = 0;
+  let postCalls = 0;
+  const dependencies = successfulDependencies([]);
+  dependencies.loadState = async () => fullState;
+  dependencies.saveState = async () => {
+    throw new Error('state must not be pruned');
+  };
+  dependencies.searchReviewRequestedPRs = async ({ repo }) => completeSearch(
+    repo === 'other/repo' ? [{ repo, number: 1 }] : [],
+  );
+  dependencies.getPullRequest = async ({ repo, number }) => ({
+    headRefOid: 'target-sha',
+    number,
+    title: 'Target PR',
+    url: `https://github.com/${repo}/pull/${number}`,
+    body: '',
+    state: 'OPEN',
+  });
+  dependencies.reviewAlreadyPosted = async () => {
+    proofCalls += 1;
+    if (proofCalls === 1) throw new Error('HTTP 404: Not Found');
+    return false;
+  };
+  dependencies.getPullRequestDiff = async () => {
+    diffCalls += 1;
+    return '';
+  };
+  dependencies.invokeMultiPassReview = async () => {
+    reviewerCalls += 1;
+    return { summary: 'reviewed', findings: [] };
+  };
+  dependencies.postReview = async () => {
+    postCalls += 1;
+  };
+
+  const result = await pollOnce({
+    config: config([donor, target]),
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, true);
+  assert.equal(result.failures[0].note, 'review state capacity reached');
+  assert.equal(proofCalls, MAX_STATE_GC_CHECKS_PER_POLL);
+  assert.equal(diffCalls, 0);
+  assert.equal(reviewerCalls, 0);
+  assert.equal(postCalls, 0);
+  assert.ok(fullState[prKey('owner/repo', 1, donor)]);
+});
+
+test('exact marker proof migrates and compacts an old donor before AI', async (t) => {
+  const files = await fixture(t);
+  const donor = { ...work, repositories: ['owner/repo'] };
+  const target = { ...personal, repositories: ['other/repo'] };
+  const fullState = capacityState(MAX_REVIEW_STATE_ENTRIES, { account: donor });
+  let lastSaved;
+  const proofNumbers = [];
+  const dependencies = successfulDependencies([]);
+  dependencies.loadState = async () => fullState;
+  dependencies.saveState = async (_path, nextState) => {
+    lastSaved = structuredClone(nextState);
+  };
+  dependencies.searchReviewRequestedPRs = async ({ repo }) => completeSearch(
+    repo === 'other/repo' ? [{ repo, number: 1 }] : [],
+  );
+  dependencies.getPullRequest = async ({ repo, number }) => ({
+    headRefOid: 'target-sha',
+    number,
+    title: 'Target PR',
+    url: `https://github.com/${repo}/pull/${number}`,
+    body: '',
+    state: 'OPEN',
+  });
+  dependencies.reviewAlreadyPosted = async ({ repo, number }) => {
+    if (repo === 'owner/repo') {
+      proofNumbers.push(number);
+      return number === 1;
+    }
+    return false;
+  };
+
+  const result = await pollOnce({
+    config: config([donor, target]),
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, false);
+  assert.deepEqual(proofNumbers, [1]);
+  assert.equal(lastSaved[prKey('owner/repo', 1, donor)], undefined);
+  assert.equal(lastSaved[prKey('other/repo', 1, target)].lastReviewedSha, 'target-sha');
+});
+
+test('a compacted marker entry rehydrates on the same SHA before diff or AI', async (t) => {
+  const files = await fixture(t);
+  const donor = { ...work, repositories: ['owner/repo'] };
+  const target = { ...personal, repositories: ['other/repo'] };
+  const fullState = capacityState(MAX_REVIEW_STATE_ENTRIES, {
+    account: donor,
+    marker: true,
+  });
+  let lastSaved;
+  let diffCalls = 0;
+  let reviewerCalls = 0;
+  let postCalls = 0;
+  const timestamp = '2026-08-11T12:00:00.000Z';
+  const dependencies = successfulDependencies([]);
+  dependencies.now = () => Date.parse(timestamp);
+  dependencies.loadState = async () => fullState;
+  dependencies.saveState = async (_path, nextState) => {
+    lastSaved = structuredClone(nextState);
+  };
+  dependencies.searchReviewRequestedPRs = async ({ repo }) =>
+    completeSearch([{ repo, number: 1 }]);
+  dependencies.getPullRequest = async ({ repo, number }) => ({
+    headRefOid: 'already-posted-sha',
+    number,
+    title: 'Recovered PR',
+    url: `https://github.com/${repo}/pull/${number}`,
+    body: '',
+    state: 'OPEN',
+  });
+  dependencies.reviewAlreadyPosted = async ({ repo }) => repo === 'other/repo';
+  dependencies.getPullRequestDiff = async () => {
+    diffCalls += 1;
+    return '';
+  };
+  dependencies.invokeMultiPassReview = async () => {
+    reviewerCalls += 1;
+    return { summary: 'reviewed', findings: [] };
+  };
+  dependencies.postReview = async () => {
+    postCalls += 1;
+  };
+
+  const result = await pollOnce({
+    config: config([donor, target]),
+    accountSelector: { hostname: target.hostname, username: target.username },
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, false);
+  assert.equal(result.outcomes[0].status, 'recovered');
+  assert.equal(diffCalls, 0);
+  assert.equal(reviewerCalls, 0);
+  assert.equal(postCalls, 0);
+  assert.deepEqual(lastSaved[prKey('other/repo', 1, target)], {
+    lastReviewedSha: 'already-posted-sha',
+    lastReviewedAt: timestamp,
+    reviewMarkerVersion: 1,
+  });
+});
+
+test('compaction save failure retains donors and stops before AI', async (t) => {
+  const files = await fixture(t);
+  const donor = { ...work, repositories: ['owner/repo'] };
+  const target = { ...personal, repositories: ['other/repo'] };
+  const fullState = capacityState(MAX_REVIEW_STATE_ENTRIES, {
+    account: donor,
+    marker: true,
+  });
+  let diffCalls = 0;
+  let reviewerCalls = 0;
+  const dependencies = successfulDependencies([]);
+  dependencies.loadState = async () => fullState;
+  dependencies.saveState = async () => {
+    throw new Error('disk full');
+  };
+  dependencies.searchReviewRequestedPRs = async ({ repo }) =>
+    completeSearch([{ repo, number: 1 }]);
+  dependencies.getPullRequest = async ({ repo, number }) => ({
+    headRefOid: 'target-sha',
+    number,
+    title: 'Target PR',
+    url: `https://github.com/${repo}/pull/${number}`,
+    body: '',
+    state: 'OPEN',
+  });
+  dependencies.getPullRequestDiff = async () => {
+    diffCalls += 1;
+    return '';
+  };
+  dependencies.invokeMultiPassReview = async () => {
+    reviewerCalls += 1;
+    return { summary: 'reviewed', findings: [] };
+  };
+
+  const result = await pollOnce({
+    config: config([donor, target]),
+    accountSelector: { hostname: target.hostname, username: target.username },
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, true);
+  assert.equal(result.failures[0].note, 'review state capacity reached');
+  assert.equal(diffCalls, 0);
+  assert.equal(reviewerCalls, 0);
+  assert.ok(fullState[prKey('owner/repo', 1, donor)]);
+  assert.equal(fullState[prKey('other/repo', 1, target)], undefined);
 });
 
 test('new commits are reported as a re-review while an unchanged head is a no-op', async (t) => {

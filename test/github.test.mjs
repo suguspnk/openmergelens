@@ -370,8 +370,9 @@ test('active review-request lookup matches an exact login case-insensitively', a
     request: async (args) => {
       requestedArgs = args;
       return [
-        JSON.stringify({ login: 'someone-else' }),
-        JSON.stringify({ login: 'octocat' }),
+        JSON.stringify({ login: 'someone-else', type: 'User' }),
+        JSON.stringify({ login: 'dependabot[bot]', type: 'Bot' }),
+        JSON.stringify({ login: 'octocat', type: 'User' }),
       ].join('\n');
     },
   });
@@ -384,7 +385,7 @@ test('active review-request lookup matches an exact login case-insensitively', a
       repo: 'owner/repo',
       number: 7,
       username: 'octocat',
-      request: async () => JSON.stringify({ login: 'octocat-team' }),
+      request: async () => JSON.stringify({ login: 'octocat-team', type: 'User' }),
     }),
     false,
   );
@@ -392,10 +393,15 @@ test('active review-request lookup matches an exact login case-insensitively', a
 
 for (const [label, output] of [
   ['missing login', '{}'],
-  ['non-string login', JSON.stringify({ login: 7 })],
+  ['non-string login', JSON.stringify({ login: 7, type: 'User' })],
   ['non-object user', 'null'],
-  ['whitespace-padded login', JSON.stringify({ login: ' octocat ' })],
-  ['invalid login', JSON.stringify({ login: 'octo.cat' })],
+  ['whitespace-padded login', JSON.stringify({ login: ' octocat ', type: 'User' })],
+  ['invalid login', JSON.stringify({ login: 'octo.cat', type: 'User' })],
+  ['missing type', JSON.stringify({ login: 'octocat' })],
+  ['unknown type', JSON.stringify({ login: 'octocat', type: 'Organization' })],
+  ['human-shaped bot', JSON.stringify({ login: 'octocat', type: 'Bot' })],
+  ['bot-shaped user', JSON.stringify({ login: 'dependabot[bot]', type: 'User' })],
+  ['unknown field', JSON.stringify({ login: 'octocat', type: 'User', id: 7 })],
   ['invalid JSON', '{'],
 ]) {
   test(`active review-request lookup rejects ${label}`, async () => {
@@ -414,7 +420,7 @@ for (const [label, output] of [
 test('active review-request lookup rejects oversized user lists and API failures', async () => {
   const oversized = Array.from(
     { length: MAX_ACTIVE_REVIEW_REQUEST_USERS + 1 },
-    (_, index) => JSON.stringify({ login: `user-${index}` }),
+    (_, index) => JSON.stringify({ login: `user-${index}`, type: 'User' }),
   ).join('\n');
   await assert.rejects(
     hasActiveReviewRequest({
@@ -443,11 +449,47 @@ test('active review-request lookup validates every returned user after a match',
       number: 7,
       username: 'octocat',
       request: async () => [
-        JSON.stringify({ login: 'octocat' }),
-        JSON.stringify({ login: 7 }),
+        JSON.stringify({ login: 'octocat', type: 'User' }),
+        JSON.stringify({ login: 7, type: 'User' }),
       ].join('\n'),
     }),
     /requested reviewers response is malformed/u,
+  );
+});
+
+test('active review-request lookup permits bounded unrelated bots but never configured bots', async () => {
+  assert.equal(
+    await hasActiveReviewRequest({
+      repo: 'owner/repo',
+      number: 7,
+      username: 'octocat',
+      request: async () => [
+        JSON.stringify({ login: 'dependabot[bot]', type: 'Bot' }),
+        JSON.stringify({ login: 'OctoCat', type: 'User' }),
+      ].join('\n'),
+    }),
+    true,
+  );
+  await assert.rejects(
+    hasActiveReviewRequest({
+      repo: 'owner/repo',
+      number: 7,
+      username: 'dependabot[bot]',
+      request: async () => JSON.stringify({
+        login: 'dependabot[bot]',
+        type: 'Bot',
+      }),
+    }),
+    /requested-reviewer username is invalid/u,
+  );
+  await assert.rejects(
+    hasActiveReviewRequest({
+      repo: 'owner/repo',
+      number: 7,
+      username: ' octocat ',
+      request: async () => '',
+    }),
+    /requested-reviewer username is invalid/u,
   );
 });
 
@@ -794,6 +836,30 @@ test('reviewAlreadyPosted rejects a forged marker from a different reviewer', as
   });
 
   assert.equal(await reviewAlreadyPosted({ ...options, request }), false);
+});
+
+test('reviewAlreadyPosted rejects malformed rows even after an exact marker match', async () => {
+  const options = reviewOptions();
+  await assert.rejects(
+    reviewAlreadyPosted({
+      ...options,
+      request: async () => [
+        JSON.stringify({
+          body: options.marker,
+          commit_id: options.commitId,
+          state: 'COMMENTED',
+          user_login: options.auth.username,
+        }),
+        JSON.stringify({
+          body: null,
+          commit_id: options.commitId,
+          state: 'UNKNOWN',
+          user_login: options.auth.username,
+        }),
+      ].join('\n'),
+    }),
+    /review reconciliation response is malformed/u,
+  );
 });
 
 test('postReview does not retry a non-validation failure', async () => {

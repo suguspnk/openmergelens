@@ -264,7 +264,12 @@ for the general pattern; these are the OpenMergeLens-specific rules.
   inputs stay small.
 - **Bound local state as well as network work.** Keep `state.json` within 16
   MiB and 10,000 review records, validate bounded canonical fields before use,
-  expire records after 365 days, and check at most 25 eligible historical keys
-  per poll. Only direct `CLOSED`/`MERGED` metadata may delete a scoped key;
-  absence, failure, malformed data, and 404 retain it. Reserve a new-key slot
-  before posting and roll back every in-memory batch if its atomic save fails.
+  reject timestamps over five minutes in the future, expire records after 365
+  days, and spend at most 25 historical closure/marker-proof operations per
+  poll. Only direct `CLOSED`/`MERGED` metadata may retire a closed scoped key;
+  absence, failure, malformed data, and 404 retain it. Before reconciliation,
+  diff fetch, or reviewer work, reserve the exact candidate record's entry and
+  serialized UTF-8 bytes. Capacity reclaim must honor dimension-specific fair
+  scope floors and may delete only exact marker-proven version-1 records, never
+  current, reserved, unscoped, invalid, or unproven state. Serialize admission
+  with state writes and roll back every in-memory batch if its atomic save fails.

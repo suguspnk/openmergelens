@@ -45,14 +45,17 @@ test('PRD documents bounded compatible review-state retention', async () => {
   const prd = await readText(path.join(projectRoot, 'PRD.md'));
 
   assert.match(prd, /Review records expire locally after exactly 365 days/u);
-  assert.match(prd, /at\s+most 25 direct metadata checks/u);
-  assert.match(prd, /selected,\s+authenticated, configured account\/repository scopes/u);
+  assert.match(prd, /at most 25\s+remote operations between exact marker proof and direct closure checks/u);
+  assert.match(prd, /selected,\s+authenticated,\s+configured\s+account\/repository scopes/u);
   assert.match(prd, /search absence, lookup failure,\s+malformed metadata, HTTP 404, and `OPEN` all retain state/u);
   assert.match(prd, /`reviewStateGcAfterKey` cursor/u);
   assert.match(prd, /Metadata remains version 1 for additive compatibility/u);
   assert.match(prd, /16 MiB pre-parse bound and can contain at most 10,000/u);
-  assert.match(prd, /new keys reserve capacity before the external POST/u);
-  assert.match(prd, /still-requested PR can become\s+eligible again after expiry/u);
+  assert.match(prd, /reserve the candidate's\s+exact final key, SHA, timestamp, entry count, and bytes before marker\s+reconciliation, diff fetch, prompt reads, or AI/u);
+  assert.match(prd, /equal soft entry and byte shares and can borrow unused\s+global space/u);
+  assert.match(prd, /never evicts the current key, an active reservation, unscoped\/invalid state, or\s+a record without exact marker proof/u);
+  assert.match(prd, /reviewMarkerVersion: 1/u);
+  assert.match(prd, /still-requested PR can become\s+eligible\s+again after expiry/u);
 });
 
 test('project instructions describe the requested-review re-review trigger', async () => {

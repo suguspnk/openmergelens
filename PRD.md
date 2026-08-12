@@ -119,10 +119,11 @@ poller as a `pnpm` script / bin.
    reported count while moving an item across page boundaries. Historical state
    is retained but cannot enter the candidate queue or consume metadata budget.
    Review records expire locally after exactly 365 days. Before returning from
-   a real poll, including an empty poll, a separate rotating sweep performs at
-   most 25 direct metadata checks for historical records in selected,
-   authenticated, configured account/repository scopes. It deletes only exact
-   keys directly confirmed `CLOSED` or `MERGED`; search absence, lookup failure,
+   a real poll, including an empty poll, rotating maintenance shares at most 25
+   remote operations between exact marker proof and direct closure checks for
+   historical records in selected, authenticated, configured
+   account/repository scopes. It deletes closed state only for exact keys
+   directly confirmed `CLOSED` or `MERGED`; search absence, lookup failure,
    malformed metadata, HTTP 404, and `OPEN` all retain state. Deconfigured and
    unscoped records receive only local expiry, never remote checks. A requested
    candidate confirmed closed or merged at initial fetch, after generation, or
@@ -151,6 +152,10 @@ poller as a `pnpm` script / bin.
      last review; if this PR was returned by the active requested-reviewer
      search, it needs re-review.
    - If key present and SHA matches → skip, already reviewed this exact head.
+   - After `needsReview` succeeds, a real poll reserves the exact final record's
+     canonical key, SHA, timestamp, entry count, and serialized UTF-8 bytes
+     before marker reconciliation, diff fetch, prompt reads, or AI work. A dry
+     run does not reserve persistence capacity.
    - If local state is missing, check the PR's submitted reviews for
      OpenMergeLens's opaque account/repo/commit marker. If found, repair local
      state and skip generation/posting. This closes the crash window between a
@@ -420,16 +425,17 @@ corresponding path under `OPENMERGELENS_HOME`).
 
 ```json
 {
-  "github.com@antonio::OWNER/socialpostai-v2#123": {
+  "github.com@antonio::owner/socialpostai-v2#123": {
     "lastReviewedSha": "abc123...",
-    "lastReviewedAt": "2026-07-24T18:00:00.000Z"
+    "lastReviewedAt": "2026-07-24T18:00:00.000Z",
+    "reviewMarkerVersion": 1
   },
   "__openmergelens": {
     "version": 1,
     "candidateCursors": {
-      "github.com@antonio::OWNER/socialpostai-v2::requested": 25
+      "github.com@antonio::owner/socialpostai-v2::requested": 25
     },
-    "reviewStateGcAfterKey": "github.com@antonio::OWNER/socialpostai-v2#123"
+    "reviewStateGcAfterKey": "github.com@antonio::owner/socialpostai-v2#123"
   }
 }
 ```
@@ -441,14 +447,37 @@ Its optional `reviewStateGcAfterKey` cursor rotates the non-admitting historical
 cleanup sweep. Metadata remains version 1 for additive compatibility.
 
 The file is read with a 16 MiB pre-parse bound and can contain at most 10,000
-review records. Persisted review keys and the GC cursor are limited to 1,024
-characters, SHAs to 128 characters, and canonical ISO timestamps to 64
-characters. Serialized output is checked against the same 16 MiB bound before
-the atomic temporary-file write. Existing records may be updated at capacity;
-new keys reserve capacity before the external POST, and no arbitrary pruning is
-allowed. Review records expire exactly 365 days after `lastReviewedAt`. This
-bounds storage at the cost that an unchanged, still-requested PR can become
-eligible again after expiry if its prior marker cannot be reconciled.
+review records. Scoped keys are canonical lowercase
+`HOST@USERNAME::owner/repo#N`; the only compatible legacy form is lowercase
+`owner/repo#N`, with case-only aliases normalized and one-account legacy state
+adopted before external work. Host, user, repository, and positive decimal PR
+segments are validated. Records reject unknown fields, limit SHAs to 128
+characters, require canonical ISO timestamps no more than five minutes in the
+future, and optionally carry only `reviewMarkerVersion: 1`. Invalid state is
+left untouched and fails before authentication or GitHub work.
+
+One shared serializer measures exact pretty-printed UTF-8 output for both
+admission and the atomic temporary-file save. Configuration is limited to
+10,000 canonical account/repository scopes independent of an account selector.
+After initial metadata and `needsReview`, real polls reserve the candidate's
+exact final key, SHA, timestamp, entry count, and bytes before marker
+reconciliation, diff fetch, prompt reads, or AI; dry runs do not reserve.
+Configured scopes have equal soft entry and byte shares and can borrow unused
+global space. Under pressure, deterministic reclaim selects the largest
+normalized overage then scope key, and the oldest timestamp then key within
+that donor. It never crosses the constrained dimension's configured floor and
+never evicts the current key, an active reservation, unscoped/invalid state, or
+a record without exact marker proof; deconfigured scopes have zero floors.
+Only an authenticated, nonpending, exact repo/PR/SHA marker can establish
+`reviewMarkerVersion: 1`. Planning, pruning, reservation, and state commits are
+serialized, and failed saves restore the complete in-memory batch.
+
+Review records expire exactly 365 days after `lastReviewedAt`. This bounds
+storage at the cost that an unchanged, still-requested PR can become eligible
+again after expiry if its prior marker cannot be reconciled. The rotating
+historical-maintenance budget remains 25 remote operations per real poll and is
+shared by direct closure checks and marker proof; absence, malformed responses,
+errors, and HTTP 404 retain the record.
 
 ## Scheduling
 

@@ -14,10 +14,12 @@ import {
   prKey,
   recordCandidateCursor,
   recordReviewStateGcAfterKey,
+  reviewScopeKey,
   reviewStateEntryCount,
   reviewStateGcAfterKey,
   reviewerKey,
   saveState,
+  serializeState,
   STATE_METADATA_KEY,
 } from '../lib/state.mjs';
 import {
@@ -34,6 +36,10 @@ test('review state keys are scoped to the GitHub reviewer', () => {
   assert.equal(
     prKey('owner/repo', 42, reviewer),
     'github.com@octocat::owner/repo#42',
+  );
+  assert.equal(
+    reviewScopeKey('GITHUB.COM@OCTOCAT::OWNER/REPO#42'),
+    'github.com@octocat::owner/repo',
   );
 });
 
@@ -146,7 +152,7 @@ test('malformed review-state GC cursors fail closed', async (t) => {
   }
 });
 
-test('positive numeric PR aliases normalize to decimal keys without losing scope', () => {
+test('case-only PR aliases normalize without accepting numeric aliases', () => {
   const canonicalKey = 'github.com@work::owner/repo#7';
   const state = {
     [canonicalKey]: {
@@ -155,42 +161,43 @@ test('positive numeric PR aliases normalize to decimal keys without losing scope
     },
   };
 
+  const caseAlias = 'GitHub.com@Work::OWNER/REPO#7';
+  assert.equal(normalizePrKey(caseAlias), canonicalKey);
+  assert.equal(needsReview(state, caseAlias, 'sha-7'), false);
+
   for (const numberText of ['007', ' 7 ', '7.0', '7e0', '0x7']) {
     const alias = `GitHub.com@Work::OWNER/REPO#${numberText}`;
-    assert.equal(normalizePrKey(alias), canonicalKey);
-    assert.equal(needsReview(state, alias, 'sha-7'), false);
+    assert.equal(normalizePrKey(alias), alias);
+    assert.throws(
+      () => normalizeState({ [alias]: state[canonicalKey] }),
+      /Invalid review state entry/u,
+    );
   }
-
-  const normalized = normalizeState({
-    'github.com@work::owner/repo#007': state[canonicalKey],
-  });
-  delete normalized[canonicalKey];
-  assert.deepEqual(normalized, {});
 });
 
-test('state normalization resolves numeric-key collisions independently of insertion order', () => {
-  const leadingZeroKey = 'github.com@work::owner/repo#007';
-  const decimalFormKey = 'github.com@work::owner/repo#7.0';
-  const leadingZeroEntry = {
-    lastReviewedSha: 'leading-zero-sha',
+test('state normalization resolves case-only collisions independently of insertion order', () => {
+  const uppercaseKey = 'GITHUB.COM@WORK::OWNER/REPO#7';
+  const mixedCaseKey = 'github.com@work::owner/REPO#7';
+  const uppercaseEntry = {
+    lastReviewedSha: 'uppercase-sha',
     lastReviewedAt: '2026-07-25T00:00:00.000Z',
   };
-  const decimalFormEntry = {
-    lastReviewedSha: 'decimal-form-sha',
+  const mixedCaseEntry = {
+    lastReviewedSha: 'mixed-case-sha',
     lastReviewedAt: '2026-07-25T01:00:00.000Z',
   };
 
   const forward = normalizeState({
-    [leadingZeroKey]: leadingZeroEntry,
-    [decimalFormKey]: decimalFormEntry,
+    [uppercaseKey]: uppercaseEntry,
+    [mixedCaseKey]: mixedCaseEntry,
   });
   const reverse = normalizeState({
-    [decimalFormKey]: decimalFormEntry,
-    [leadingZeroKey]: leadingZeroEntry,
+    [mixedCaseKey]: mixedCaseEntry,
+    [uppercaseKey]: uppercaseEntry,
   });
 
   assert.deepEqual(forward, reverse);
-  assert.equal(forward['github.com@work::owner/repo#7'].lastReviewedSha, 'leading-zero-sha');
+  assert.equal(forward['github.com@work::owner/repo#7'].lastReviewedSha, 'uppercase-sha');
 });
 
 test('legacy state migration adopts unscoped entries without overwriting scoped state', () => {
@@ -248,7 +255,7 @@ test('loading malformed review entries fails closed', async (t) => {
 
   await assert.rejects(
     loadState(stateFile),
-    /Invalid review state entry.*expected bounded lastReviewedSha and canonical lastReviewedAt strings/,
+    /Invalid review state entry.*canonical key, bounded record fields/u,
   );
 });
 
@@ -271,12 +278,91 @@ test('review-state fields and timestamps are bounded and canonical', async (t) =
     },
     { 'owner/repo#1': { ...entry, lastReviewedAt: 'not-a-date' } },
     { 'owner/repo#1': { ...entry, lastReviewedAt: '2026-08-11T00:00:00Z' } },
+    { 'owner/repo#1': { ...entry, reviewMarkerVersion: 2 } },
+    { 'owner/repo#1': { ...entry, unexpected: true } },
+    {
+      'owner/repo#1': {
+        ...entry,
+        lastReviewedAt: new Date(Date.now() + 5 * 60 * 1_000 + 1_000).toISOString(),
+      },
+    },
   ];
 
   for (const state of malformedStates) {
     await assert.rejects(saveState(stateFile, state), /Invalid review state entry/u);
   }
   await assert.rejects(stat(stateFile), { code: 'ENOENT' });
+});
+
+test('review state accepts only canonical identifiers and optional marker version 1', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const entry = {
+    lastReviewedSha: 'sha-1',
+    lastReviewedAt: '2026-08-11T00:00:00.000Z',
+    reviewMarkerVersion: 1,
+  };
+
+  await saveState(stateFile, {
+    'GITHUB.COM@OCTOCAT::OWNER/REPO#7': entry,
+    'LEGACY/REPO#8': { ...entry, reviewMarkerVersion: undefined },
+  });
+  assert.deepEqual(await loadState(stateFile), {
+    'github.com@octocat::owner/repo#7': entry,
+    'legacy/repo#8': {
+      lastReviewedSha: 'sha-1',
+      lastReviewedAt: '2026-08-11T00:00:00.000Z',
+    },
+  });
+
+  for (const key of [
+    'github.com@@octocat::owner/repo#7',
+    'github.com@octocat::owner/repo#0',
+    'github.com@octocat::owner/repo#01',
+    'github.com@octocat::owner/repo#9007199254740992',
+    'github.com@octocat::owner/repo/extra#7',
+    'bad host@octocat::owner/repo#7',
+  ]) {
+    await assert.rejects(
+      saveState(stateFile, { [key]: entry }),
+      /Invalid review state entry/u,
+    );
+  }
+});
+
+test('invalid state is rejected before permission hardening', {
+  skip: process.platform === 'win32',
+}, async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  await writeFile(stateFile, JSON.stringify({
+    'owner/repo#01': {
+      lastReviewedSha: 'sha-1',
+      lastReviewedAt: '2026-08-11T00:00:00.000Z',
+    },
+  }));
+  await chmod(stateFile, 0o644);
+
+  await assert.rejects(loadState(stateFile), /Invalid review state entry/u);
+  assert.equal((await stat(stateFile)).mode & 0o777, 0o644);
+});
+
+test('shared serialization reports exact UTF-8 bytes', () => {
+  const state = {
+    'owner/repo#1': {
+      lastReviewedSha: '€-sha',
+      lastReviewedAt: '2026-08-11T00:00:00.000Z',
+      reviewMarkerVersion: 1,
+    },
+  };
+  const result = serializeState(state);
+  assert.equal(
+    result.serializedBytes,
+    Buffer.byteLength(result.serialized, 'utf8'),
+  );
+  assert.ok(result.serializedBytes > result.serialized.length);
 });
 
 test('review-state load is byte-bounded before JSON parsing', async (t) => {
@@ -317,9 +403,8 @@ test('serialized review state is byte-bounded before creating the target file', 
   const stateFile = path.join(directory, 'state.json');
   const state = {};
   for (let index = 0; index < MAX_REVIEW_STATE_ENTRIES; index += 1) {
-    const prefix = String(index).padStart(5, '0');
-    state[`${prefix}${'k'.repeat(MAX_REVIEW_STATE_KEY_CHARS - prefix.length)}`] = {
-      lastReviewedSha: 's'.repeat(MAX_REVIEW_STATE_SHA_CHARS),
+    state[prKey('owner/repo', index + 1, reviewer)] = {
+      lastReviewedSha: '€'.repeat(MAX_REVIEW_STATE_SHA_CHARS),
       lastReviewedAt: '2026-08-11T00:00:00.000Z',
     };
   }
@@ -328,7 +413,7 @@ test('serialized review state is byte-bounded before creating the target file', 
     candidateCursors: Object.fromEntries(
       Array.from({ length: MAX_REVIEW_STATE_ENTRIES }, (_, index) => {
         const prefix = String(index).padStart(5, '0');
-        return [`${prefix}${'c'.repeat(512 - prefix.length)}`, index];
+        return [`${prefix}${'€'.repeat(507)}`, index];
       }),
     ),
   };

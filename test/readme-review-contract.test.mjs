@@ -17,10 +17,14 @@ test('README requires a fresh active request for every review candidate', async 
   assert.match(readme, /A requested PR that is fetched and found closed or merged is retired/u);
   assert.match(readme, /Dry runs never change\s+state/u);
   assert.match(readme, /revalidates the exact, case-insensitive requested-reviewer\s+login after generation and immediately before every review POST/u);
-  assert.match(readme, /Read-only reconciliation after an ambiguous or successful\s+POST remains allowed/u);
+  assert.match(readme, /Read-only reconciliation after an ambiguous or\s+successful\s+POST\s+remains allowed/u);
+  assert.match(readme, /bounded unrelated `Bot` actors ending in `\[bot\]` may coexist/u);
   assert.match(readme, /Review records expire 365 days/u);
-  assert.match(readme, /at most 25 deterministic, rotating\s+historical records/u);
+  assert.match(readme, /at most\s+25 deterministic, rotating historical-maintenance operations/u);
   assert.match(readme, /state file is limited to\s+10,000 review records and 16 MiB/u);
+  assert.match(readme, /reserves the candidate's\s+exact key, SHA, canonical timestamp, record count, and serialized UTF-8 bytes\s+before marker reconciliation, diff fetch, prompt reads, or reviewer work/u);
+  assert.match(readme, /equal soft entry and byte shares but may borrow unused global capacity/u);
+  assert.match(readme, /Current, reserved, unscoped, malformed, and\s+unproven records are never evicted/u);
   assert.match(readme, /still-requested PR can become eligible again after its record expires/u);
   assert.doesNotMatch(readme, /tracked fallback/iu);
 });
