@@ -570,6 +570,12 @@ test('review-state entry count is bounded on load and save', async (t) => {
   );
 
   await assert.rejects(saveState(stateFile, oversized), /too many review entries/u);
+  await saveState(stateFile, oversized, { allowEntryLimitMigration: true });
+  await assert.rejects(loadState(stateFile), /too many review entries/u);
+  const migratable = await loadState(stateFile, {
+    allowEntryLimitMigration: true,
+  });
+  assert.equal(Object.keys(migratable).length, MAX_REVIEW_STATE_ENTRIES + 1);
   await writeFile(stateFile, JSON.stringify(oversized));
   await assert.rejects(loadState(stateFile), /too many review entries/u);
 });
@@ -597,6 +603,10 @@ test('serialized review state is byte-bounded before creating the target file', 
 
   await assert.rejects(
     saveState(stateFile, state),
+    new RegExp(`serialized state exceeds ${MAX_STATE_FILE_BYTES} bytes`, 'u'),
+  );
+  await assert.rejects(
+    saveState(stateFile, state, { allowEntryLimitMigration: true }),
     new RegExp(`serialized state exceeds ${MAX_STATE_FILE_BYTES} bytes`, 'u'),
   );
   await assert.rejects(stat(stateFile), { code: 'ENOENT' });

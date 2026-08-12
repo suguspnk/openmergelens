@@ -474,9 +474,12 @@ left untouched and fails before authentication or GitHub work.
 
 One legacy file containing more than 10,000 otherwise valid records can upgrade
 through deterministic 365-day expiry plus at most 1,000 authenticated PR-state
-checks. Only records GitHub confirms are `CLOSED` or `MERGED` are additionally
-retired, and the repair is saved atomically before discovery. Malformed or
-still-active excess records fail closed instead of being pruned arbitrarily.
+checks per poll. Remote checks require valid config-wide AI-processing consent.
+An unsuccessful window is rotated byte-neutrally in the existing entry order so
+later windows are eventually inspected without deleting records. Only records
+GitHub confirms are `CLOSED` or `MERGED` are retired, and repair/progress is
+saved atomically before discovery. Malformed or still-active excess records
+fail closed instead of being pruned arbitrarily.
 
 One shared serializer measures exact pretty-printed UTF-8 output for both
 admission and the atomic temporary-file save. Configuration is limited to
