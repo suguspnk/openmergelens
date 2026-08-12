@@ -14,13 +14,10 @@ import {
   prKey,
   recordCandidateCursor,
   recordReviewStateGcAfterKey,
-  recordReviewStateProofAfterKey,
-  recordReviewStateProofAfterScope,
+  rotateReviewStateProofQueue,
   reviewScopeKey,
   reviewStateEntryCount,
   reviewStateGcAfterKey,
-  reviewStateProofAfterKey,
-  reviewStateProofAfterScope,
   reviewerKey,
   saveState,
   serializeState,
@@ -100,12 +97,6 @@ test('review-state GC cursor round-trips additively with candidate cursors', asy
   const state = {};
 
   recordReviewStateGcAfterKey(state, 'github.com@octocat::owner/repo#7');
-  recordReviewStateProofAfterScope(state, 'github.com@octocat::owner/repo');
-  recordReviewStateProofAfterKey(
-    state,
-    'github.com@octocat::owner/repo',
-    'github.com@octocat::owner/repo#6',
-  );
   recordCandidateCursor(state, 'github.com@octocat::owner/repo::requested', 4);
   assert.equal(
     reviewStateGcAfterKey(state),
@@ -120,19 +111,51 @@ test('review-state GC cursor round-trips additively with candidate cursors', asy
       'github.com@octocat::owner/repo::requested': 4,
     },
     reviewStateGcAfterKey: 'github.com@octocat::owner/repo#7',
-    reviewStateProofAfterScope: 'github.com@octocat::owner/repo',
-    reviewStateProofAfterKeys: {
-      'github.com@octocat::owner/repo': 'github.com@octocat::owner/repo#6',
-    },
   });
-  assert.equal(
-    reviewStateProofAfterScope(loaded),
-    'github.com@octocat::owner/repo',
+});
+
+test('proof queue rotation is byte-stable and predecessor-readable', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const scopeA = 'github.com@octocat::owner/a';
+  const scopeB = 'github.com@octocat::owner/b';
+  const state = Object.fromEntries([
+    [`${scopeA}#1`, { lastReviewedSha: 'a-1', lastReviewedAt: '2026-07-25T00:00:00.000Z' }],
+    [`${scopeA}#2`, { lastReviewedSha: 'a-2', lastReviewedAt: '2026-07-25T00:00:00.000Z' }],
+    [`${scopeB}#1`, { lastReviewedSha: 'b-1', lastReviewedAt: '2026-07-25T00:00:00.000Z' }],
+    [`${scopeB}#2`, { lastReviewedSha: 'b-2', lastReviewedAt: '2026-07-25T00:00:00.000Z' }],
+  ]);
+  recordCandidateCursor(state, `${scopeA}::requested`, 3);
+  recordReviewStateGcAfterKey(state, `${scopeA}#2`);
+  const before = serializeState(state);
+
+  rotateReviewStateProofQueue(state, scopeA, `${scopeA}#1`);
+  const after = serializeState(state);
+  assert.equal(after.serializedBytes, before.serializedBytes);
+  assert.deepEqual(
+    Object.keys(after.normalizedState).filter((key) => key !== STATE_METADATA_KEY),
+    [`${scopeB}#1`, `${scopeB}#2`, `${scopeA}#2`, `${scopeA}#1`],
   );
-  assert.equal(
-    reviewStateProofAfterKey(loaded, 'github.com@octocat::owner/repo'),
-    'github.com@octocat::owner/repo#6',
+  assert.deepEqual(
+    Object.keys(after.normalizedState[STATE_METADATA_KEY]).sort(),
+    ['candidateCursors', 'reviewStateGcAfterKey', 'version'],
   );
+
+  // This is the immediate predecessor's strict version-1 field whitelist.
+  const predecessorFields = new Set([
+    'version',
+    'candidateCursors',
+    'reviewStateGcAfterKey',
+  ]);
+  assert.equal(
+    Object.keys(after.normalizedState[STATE_METADATA_KEY])
+      .some((field) => !predecessorFields.has(field)),
+    false,
+  );
+  await saveState(stateFile, state);
+  const loaded = await loadState(stateFile);
+  assert.deepEqual(Object.keys(loaded), Object.keys(after.normalizedState));
 });
 
 test('malformed candidate scheduling metadata fails closed', async (t) => {
@@ -199,6 +222,40 @@ test('malformed review-state proof cursors fail closed', async (t) => {
       /review-state proof .*cursor/u,
     );
   }
+});
+
+test('experimental proof cursor fields migrate once into predecessor-readable order', () => {
+  const scopeA = 'github.com@octocat::owner/a';
+  const scopeB = 'github.com@octocat::owner/b';
+  const normalized = normalizeState({
+    [`${scopeA}#1`]: {
+      lastReviewedSha: 'a-1',
+      lastReviewedAt: '2026-07-25T00:00:00.000Z',
+    },
+    [`${scopeA}#2`]: {
+      lastReviewedSha: 'a-2',
+      lastReviewedAt: '2026-07-25T00:00:00.000Z',
+    },
+    [`${scopeB}#1`]: {
+      lastReviewedSha: 'b-1',
+      lastReviewedAt: '2026-07-25T00:00:00.000Z',
+    },
+    [STATE_METADATA_KEY]: {
+      version: 1,
+      candidateCursors: {},
+      reviewStateProofAfterScope: scopeA,
+      reviewStateProofAfterKeys: { [scopeA]: `${scopeA}#1` },
+    },
+  });
+
+  assert.deepEqual(
+    Object.keys(normalized),
+    [`${scopeB}#1`, `${scopeA}#2`, `${scopeA}#1`, STATE_METADATA_KEY],
+  );
+  assert.deepEqual(normalized[STATE_METADATA_KEY], {
+    version: 1,
+    candidateCursors: {},
+  });
 });
 
 test('case-only PR aliases normalize without accepting numeric aliases', () => {

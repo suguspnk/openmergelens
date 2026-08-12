@@ -49,7 +49,11 @@ test('PRD documents bounded compatible review-state retention', async () => {
   assert.match(prd, /selected,\s+authenticated,\s+configured\s+account\/repository scopes/u);
   assert.match(prd, /search absence, lookup failure,\s+malformed metadata, HTTP 404, and `OPEN` all retain state/u);
   assert.match(prd, /`reviewStateGcAfterKey` cursor/u);
-  assert.match(prd, /Metadata remains version 1 for additive compatibility/u);
+  assert.match(
+    prd,
+    /keeps version 1 metadata\s+readable by earlier strict readers/u,
+  );
+  assert.match(prd, /converts their last position\s+to the byte-neutral entry order/u);
   assert.match(prd, /16 MiB pre-parse bound and can contain at most 10,000/u);
   assert.match(prd, /reserve the candidate's\s+exact final key, SHA, timestamp, entry count, and bytes before marker\s+reconciliation, diff fetch, prompt reads, or AI/u);
   assert.match(prd, /equal soft entry and byte shares and can borrow unused\s+global space/u);

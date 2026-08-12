@@ -27,8 +27,6 @@ import { MAX_CANDIDATE_METADATA_PER_POLL } from '../lib/poller.mjs';
 import {
   prKey,
   reviewStateGcAfterKey,
-  reviewStateProofAfterKey,
-  reviewStateProofAfterScope,
   saveState,
   serializeState,
   STATE_METADATA_KEY,
@@ -484,6 +482,88 @@ test('pollOnce rolls back legacy adoption when migration persistence fails', asy
   );
   assert.deepEqual(events.filter((event) => event.startsWith('post:')), []);
   assert.deepEqual(JSON.parse(await readFile(files.stateFile, 'utf8')), initialState);
+});
+
+test('pollOnce persists proof queue migration before authentication', async (t) => {
+  const files = await fixture(t);
+  const scope = 'github.com@work::owner/repo';
+  await writeFile(files.stateFile, JSON.stringify({
+    [`${scope}#1`]: {
+      lastReviewedSha: 'sha-1',
+      lastReviewedAt: '2026-08-05T00:00:00.000Z',
+    },
+    [`${scope}#2`]: {
+      lastReviewedSha: 'sha-2',
+      lastReviewedAt: '2026-08-05T00:00:00.000Z',
+    },
+    [STATE_METADATA_KEY]: {
+      version: 1,
+      candidateCursors: {},
+      reviewStateProofAfterScope: scope,
+      reviewStateProofAfterKeys: { [scope]: `${scope}#1` },
+    },
+  }));
+  const events = [];
+  const dependencies = successfulDependencies(events);
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([]);
+
+  const result = await pollOnce({
+    config: config([work]),
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, false);
+  const persisted = JSON.parse(await readFile(files.stateFile, 'utf8'));
+  assert.deepEqual(Object.keys(persisted), [
+    `${scope}#2`,
+    `${scope}#1`,
+    STATE_METADATA_KEY,
+  ]);
+  assert.deepEqual(persisted[STATE_METADATA_KEY], {
+    version: 1,
+    candidateCursors: {},
+  });
+});
+
+test('proof queue migration failure stops before authentication', async (t) => {
+  const files = await fixture(t);
+  const scope = 'github.com@work::owner/repo';
+  const experimentalState = {
+    [`${scope}#1`]: {
+      lastReviewedSha: 'sha-1',
+      lastReviewedAt: '2026-08-05T00:00:00.000Z',
+    },
+    [STATE_METADATA_KEY]: {
+      version: 1,
+      candidateCursors: {},
+      reviewStateProofAfterScope: scope,
+      reviewStateProofAfterKeys: { [scope]: `${scope}#1` },
+    },
+  };
+  await writeFile(files.stateFile, JSON.stringify(experimentalState));
+  let authCalls = 0;
+  const dependencies = successfulDependencies([]);
+  dependencies.resolveGitHubAuth = async () => {
+    authCalls += 1;
+    return { username: work.username };
+  };
+  dependencies.saveState = async () => {
+    throw new Error('disk full');
+  };
+
+  const result = await pollOnce({
+    config: config([work]),
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, true);
+  assert.deepEqual(result.failures.map(({ note }) => note), [
+    'proof metadata migration failed',
+  ]);
+  assert.equal(authCalls, 0);
+  assert.deepEqual(JSON.parse(await readFile(files.stateFile, 'utf8')), experimentalState);
 });
 
 test('invalid legacy state fails before authentication and remains untouched', async (t) => {
@@ -4878,14 +4958,14 @@ test('marker-proof cursor rolls back in memory when its atomic save fails', asyn
 
   assert.equal(result.failed, true);
   assert.equal(result.failures[0].note, 'review state capacity reached');
-  assert.ok(reviewStateProofAfterScope(savedStates[0]));
-  assert.ok(
-    reviewStateProofAfterKey(
-      savedStates[0],
-      reviewStateProofAfterScope(savedStates[0]),
-    ),
+  assert.deepEqual(
+    Object.keys(savedStates[0]).filter((key) => key !== STATE_METADATA_KEY),
+    [...Object.keys(fullState).slice(1), Object.keys(fullState)[0]],
   );
-  assert.equal(reviewStateProofAfterScope(observedLiveState), null);
+  assert.deepEqual(
+    Object.keys(observedLiveState).filter((key) => key !== STATE_METADATA_KEY),
+    Object.keys(fullState),
+  );
   for (const key of Object.keys(fullState)) {
     assert.ok(observedLiveState[key]);
   }
@@ -4933,6 +5013,63 @@ test('exact marker proof migrates and compacts an old donor before AI', async (t
   assert.deepEqual(proofNumbers, [1]);
   assert.equal(lastSaved[prKey('owner/repo', 1, donor)], undefined);
   assert.equal(lastSaved[prKey('other/repo', 1, target)].lastReviewedSha, 'target-sha');
+});
+
+test('byte-ceiling proof rotation reaches an exact victim without metadata growth', async (t) => {
+  const files = await fixture(t);
+  const donorRepo = `owner/${'d'.repeat(100)}`;
+  const donor = {
+    hostname: 'github.com',
+    username: 'long-donor-account-name',
+    repositories: [donorRepo],
+  };
+  const target = {
+    hostname: 'github.com',
+    username: 'p',
+    repositories: ['o/r'],
+  };
+  const state = capacityState(MAX_REVIEW_STATE_ENTRIES, {
+    account: donor,
+    repo: donorRepo,
+    shaFor: () => '\0'.repeat(128),
+  });
+  const initialBytes = padStateNearByteLimit(state, MAX_STATE_FILE_BYTES - 5);
+  assert.ok(initialBytes >= MAX_STATE_FILE_BYTES - 10);
+  const proofCalls = [];
+  let persistedState;
+  const dependencies = successfulDependencies([]);
+  dependencies.loadState = async () => state;
+  dependencies.saveState = async (_path, nextState) => {
+    serializeState(nextState);
+    persistedState = structuredClone(nextState);
+  };
+  dependencies.searchReviewRequestedPRs = async ({ repo }) => completeSearch(
+    repo === 'o/r' ? [{ repo, number: 1 }] : [],
+  );
+  dependencies.getPullRequest = async ({ repo, number }) => ({
+    headRefOid: 'target-sha',
+    number,
+    title: 'Target PR',
+    url: `https://github.com/${repo}/pull/${number}`,
+    body: '',
+    state: 'OPEN',
+  });
+  dependencies.reviewAlreadyPosted = async ({ repo, number }) => {
+    if (repo === donorRepo) proofCalls.push(number);
+    return repo === donorRepo && number === 1;
+  };
+
+  const result = await pollOnce({
+    config: config([donor, target]),
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, false);
+  assert.deepEqual(proofCalls, [1]);
+  assert.equal(persistedState[prKey(donorRepo, 1, donor)], undefined);
+  assert.equal(persistedState[prKey('o/r', 1, target)].lastReviewedSha, 'target-sha');
+  assert.ok(serializeState(persistedState).serializedBytes <= MAX_STATE_FILE_BYTES);
 });
 
 test('a compacted marker entry rehydrates on the same SHA before diff or AI', async (t) => {

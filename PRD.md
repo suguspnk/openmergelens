@@ -435,11 +435,7 @@ corresponding path under `OPENMERGELENS_HOME`).
     "candidateCursors": {
       "github.com@antonio::owner/socialpostai-v2::requested": 25
     },
-    "reviewStateGcAfterKey": "github.com@antonio::owner/socialpostai-v2#123",
-    "reviewStateProofAfterScope": "github.com@antonio::owner/socialpostai-v2",
-    "reviewStateProofAfterKeys": {
-      "github.com@antonio::owner/socialpostai-v2": "github.com@antonio::owner/socialpostai-v2#123"
-    }
+    "reviewStateGcAfterKey": "github.com@antonio::owner/socialpostai-v2#123"
   }
 }
 ```
@@ -448,10 +444,19 @@ The reserved `__openmergelens` entry is optional scheduler metadata, not a
 review record. It advances bounded candidate windows independently per account,
 repository, and discovery source when one poll cannot inspect every candidate.
 Its optional `reviewStateGcAfterKey` cursor rotates the non-admitting historical
-cleanup sweep. Separate bounded `reviewStateProofAfterScope` and
-`reviewStateProofAfterKeys` cursors rotate marker-proof work across scopes and
-within each scope without coupling proof order to closure cleanup order.
-Metadata remains version 1 for additive compatibility.
+cleanup sweep. Marker-proof work rotates review-entry order deterministically:
+each checked entry moves behind the other entries in its scope and each checked
+scope moves behind the other scopes. Reordering adds no bytes at the state-file
+ceiling, remains independent of closure cleanup, and keeps version 1 metadata
+readable by earlier strict readers.
+
+An unreleased intermediate build wrote two extra version 1 proof-cursor
+fields. A non-dry poll accepts those fields once, converts their last position
+to the byte-neutral entry order, and atomically saves predecessor-readable
+metadata before authentication or GitHub work. If that migration save fails,
+the poll stops with the original file untouched. Dry runs preserve their
+no-write guarantee, so downgrade after encountering that intermediate state
+requires one successful non-dry migration first.
 
 The file is read with a 16 MiB pre-parse bound and can contain at most 10,000
 review records. Scoped keys are canonical lowercase

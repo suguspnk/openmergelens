@@ -13,8 +13,6 @@ import {
 import {
   prKey,
   reviewStateGcAfterKey,
-  reviewStateProofAfterKey,
-  reviewStateProofAfterScope,
   STATE_METADATA_KEY,
 } from '../lib/state.mjs';
 
@@ -585,11 +583,9 @@ test('marker-proof cursor rotates across skewed unequal-pressure donor scopes', 
     ...donorEntries('owner/b', 4_999, 1),
   ]);
   const donorAKeys = Object.keys(persistedState)
-    .filter((key) => key.startsWith('github.com@work::owner/a#'))
-    .sort();
+    .filter((key) => key.startsWith('github.com@work::owner/a#'));
   const donorBKeys = Object.keys(persistedState)
-    .filter((key) => key.startsWith('github.com@work::owner/b#'))
-    .sort();
+    .filter((key) => key.startsWith('github.com@work::owner/b#'));
   const exactProofKey = donorBKeys[12];
   const exactProofNumber = parseInt(
     exactProofKey.slice(exactProofKey.lastIndexOf('#') + 1),
@@ -688,12 +684,8 @@ test('marker-proof cursor rotates across skewed unequal-pressure donor scopes', 
     donorAKeys.slice(0, 12).flatMap((key, index) => [key, donorBKeys[index]]),
   );
   assert.equal(
-    reviewStateProofAfterScope(persistedState),
-    'github.com@work::owner/b',
-  );
-  assert.equal(
-    reviewStateProofAfterKey(persistedState, 'github.com@work::owner/b'),
-    donorBKeys[11],
+    Object.keys(persistedState).find((key) => key !== STATE_METADATA_KEY),
+    donorAKeys[12],
   );
   for (const key of [...donorAKeys, ...donorBKeys]) assert.ok(persistedState[key]);
 
@@ -737,7 +729,8 @@ test('marker-proof cursor reaches a later exact proof on the next poll without s
       },
     ]),
   );
-  const proofOrder = Object.keys(persistedState).sort();
+  const proofOrder = Object.keys(persistedState);
+  const closureOrder = [...proofOrder].sort();
   const exactProofKey = proofOrder[25];
   const exactProofNumber = Number(
     exactProofKey.slice(exactProofKey.lastIndexOf('#') + 1),
@@ -837,11 +830,11 @@ test('marker-proof cursor reaches a later exact proof on the next poll without s
   assert.equal(first.failures[0].note, 'review state capacity reached');
   assert.deepEqual(proofCalls, proofOrder.slice(0, 24));
   assert.equal(
-    reviewStateProofAfterKey(persistedState, 'github.com@work::owner/repo'),
-    proofOrder[23],
+    Object.keys(persistedState).find((key) => key !== STATE_METADATA_KEY),
+    proofOrder[24],
   );
-  assert.equal(reviewStateGcAfterKey(persistedState), proofOrder[0]);
-  assert.deepEqual(gcCalls, [proofOrder[0]]);
+  assert.equal(reviewStateGcAfterKey(persistedState), closureOrder[0]);
+  assert.deepEqual(gcCalls, [closureOrder[0]]);
   for (const key of proofOrder) assert.ok(persistedState[key]);
 
   const second = await runPoll();
@@ -852,7 +845,7 @@ test('marker-proof cursor reaches a later exact proof on the next poll without s
     persistedState[prKey('other/repo', 1, target)].lastReviewedSha,
     'target-sha',
   );
-  assert.equal(gcCalls[1], proofOrder[1]);
+  assert.equal(gcCalls[1], closureOrder[1]);
   assert.equal(reviewStateGcAfterKey(persistedState), gcCalls.at(-1));
   assert.ok(gcCalls.length > 1);
 });
