@@ -84,3 +84,29 @@ test('resolveUserPath resolves a relative path against the user home', (t) => {
   assert.equal(resolveUserPath('./state.json'), path.join(customHome, 'state.json'));
   assert.equal(resolveUserPath('docs/checklist.md'), path.join(customHome, 'docs', 'checklist.md'));
 });
+
+test('Windows review state paths remain inside the private user home', () => {
+  const options = {
+    platform: 'win32',
+    homeDirectory: 'C:\\Users\\octocat\\.openmergelens',
+  };
+
+  assert.equal(
+    resolveUserPath('.\\state.json', options),
+    'C:\\Users\\octocat\\.openmergelens\\state.json',
+  );
+  assert.equal(
+    resolveUserPath('c:\\users\\OCTOCAT\\.openmergelens\\nested\\state.json', options),
+    'c:\\users\\OCTOCAT\\.openmergelens\\nested\\state.json',
+  );
+  for (const unsafe of [
+    '..\\state.json',
+    'C:\\Users\\octocat\\state.json',
+    '\\\\server\\share\\state.json',
+  ]) {
+    assert.throws(
+      () => resolveUserPath(unsafe, options),
+      /must remain within OPENMERGELENS_HOME/u,
+    );
+  }
+});

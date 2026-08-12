@@ -31,6 +31,62 @@ test('GitHub auth timeout force-kills a child that ignores SIGTERM', {
   assert.ok(Date.now() - startedAt < 1_000);
 });
 
+test('GitHub auth timeout keeps tree kill armed after the leader exits', {
+  skip: process.platform === 'win32',
+  timeout: 3_000,
+}, async () => {
+  let descendantPid;
+  const exists = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err) {
+      if (err.code === 'ESRCH') return false;
+      throw err;
+    }
+  };
+
+  try {
+    let timeoutError;
+    await assert.rejects(
+      runGitHubAuthCommand(
+        process.execPath,
+        [
+          '-e',
+          [
+            'const {spawn}=require("node:child_process")',
+            'const child=spawn(process.execPath,["-e","process.on(\\"SIGTERM\\",()=>{});setInterval(()=>{},1000)"],{stdio:"ignore"})',
+            'process.stdout.write(String(child.pid)+"\\n")',
+            'process.on("SIGTERM",()=>process.exit(0))',
+            'setInterval(()=>{},1000)',
+          ].join(';'),
+        ],
+        {
+          timeoutMs: 100,
+          environment: process.env,
+          hardKillGraceMs: 50,
+        },
+      ).catch((err) => {
+        timeoutError = err;
+        throw err;
+      }),
+      (err) => err?.code === 'ETIMEDOUT',
+    );
+    descendantPid = Number.parseInt(timeoutError.stdout.trim(), 10);
+    assert.ok(Number.isInteger(descendantPid));
+
+    const exitDeadline = Date.now() + 1_000;
+    while (exists(descendantPid) && Date.now() < exitDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(exists(descendantPid), false);
+  } finally {
+    if (Number.isInteger(descendantPid) && exists(descendantPid)) {
+      process.kill(descendantPid, 'SIGKILL');
+    }
+  }
+});
+
 test('parseAuthStatus returns every authenticated account and active state', () => {
   const output = `github.com
   ✓ Logged in to github.com account octocat-work (keyring)

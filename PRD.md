@@ -418,8 +418,11 @@ Repository targets are always explicit `OWNER/REPO` strings.
 
 ## State file shape (local-only user state)
 
-`stateFile` supports an explicit absolute path. Relative values are resolved
-under the user home described above, so the `"./state.json"` value in
+On POSIX, `stateFile` supports an explicit absolute path subject to the
+ownership and mode checks below. Windows cannot portably verify an arbitrary
+parent ACL through Node, so Windows state paths must remain within the private
+OpenMergeLens user home. Relative values are resolved under the user home, so
+the `"./state.json"` value in
 `config.example.json` means `~/.openmergelens/state.json` by default (or the
 corresponding path under `OPENMERGELENS_HOME`).
 
@@ -506,7 +509,8 @@ and three failed or malformed responses stop that poll's remote repair work.
 Authentication is scheduled in bounded batches only while the same end-to-end
 repair deadline remains live. Each authentication subprocess receives the
 remaining request timeout and, if it ignores graceful termination, its detached
-process tree is force-killed after a bounded grace period. Confirmed-deletion capacity is projected with
+process tree is force-killed after a bounded grace period even when the leader
+exits first. Confirmed-deletion capacity is projected with
 incremental exact entry and UTF-8 byte accounting rather than repeatedly
 serializing the full legacy state.
 If authentication consumes the deadline, all records for that attempted account
