@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -737,6 +737,37 @@ test('state saves atomically without leaving temporary files', async (t) => {
   await saveState(stateFile, replacement);
   assert.deepEqual(await loadState(stateFile), replacement);
   assert.deepEqual(await readdir(path.dirname(stateFile)), ['state.json']);
+});
+
+test('permission hardening failure leaves the previous state committed', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const initialState = {
+    [prKey('owner/repo', 1, reviewer)]: {
+      lastReviewedSha: 'sha-1',
+      lastReviewedAt: '2026-07-28T00:00:00.000Z',
+    },
+  };
+  await saveState(stateFile, initialState);
+  const originalBytes = await readFile(stateFile, 'utf8');
+  const replacement = {
+    ...initialState,
+    [prKey('owner/repo', 2, reviewer)]: {
+      lastReviewedSha: 'sha-2',
+      lastReviewedAt: '2026-07-28T01:00:00.000Z',
+    },
+  };
+
+  await assert.rejects(
+    saveState(stateFile, replacement, {
+      enforceMode: async () => { throw new Error('chmod failed'); },
+    }),
+    /chmod failed/u,
+  );
+
+  assert.equal(await readFile(stateFile, 'utf8'), originalBytes);
+  assert.deepEqual(await readdir(directory), ['state.json']);
 });
 
 test('saving an absolute state path does not tighten its existing parent', {
