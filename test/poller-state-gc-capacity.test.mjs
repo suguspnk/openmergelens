@@ -315,6 +315,81 @@ test('legacy over-cap state reclaims only remotely confirmed closed entries', as
   );
 });
 
+test('legacy over-cap repair adopts an unscoped marker before discovery', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-upgrade-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const stateFile = path.join(root, 'state.json');
+  const targetNumber = MAX_REVIEW_STATE_ENTRIES + 1;
+  const targetKey = `owner/repo#${targetNumber}`;
+  const scopedTargetKey = prKey('owner/repo', targetNumber, account);
+  const initialState = Object.fromEntries(
+    Array.from({ length: MAX_REVIEW_STATE_ENTRIES }, (_, index) => [
+      prKey('owner/repo', index + 1, account),
+      {
+        lastReviewedSha: `sha-${index + 1}`,
+        lastReviewedAt: '2026-08-11T00:00:00.000Z',
+      },
+    ]),
+  );
+  initialState[targetKey] = {
+    lastReviewedSha: 'target-sha',
+    lastReviewedAt: '2026-08-11T00:00:00.000Z',
+    reviewMarkerVersion: 1,
+  };
+  await writeFile(stateFile, JSON.stringify(initialState));
+  const closedKey = prKey('owner/repo', 1, account);
+  let reviewerCalls = 0;
+  let postCalls = 0;
+  let reconciliationCalls = 0;
+  const dependencies = migrationDependencies();
+  dependencies.getPullRequestForStateGc = async ({ repo, number }) => ({
+    headRefOid: `sha-${number}`,
+    number,
+    title: 'Tracked PR',
+    url: `https://github.com/${repo}/pull/${number}`,
+    body: '',
+    state: prKey(repo, number, account) === closedKey ? 'CLOSED' : 'OPEN',
+  });
+  dependencies.searchReviewRequestedPRs = async () => completeSearch([
+    { repo: 'owner/repo', number: targetNumber },
+  ]);
+  dependencies.getPullRequest = async ({ repo, number }) => ({
+    headRefOid: 'target-sha',
+    number,
+    title: 'Requested PR',
+    url: `https://github.com/${repo}/pull/${number}`,
+    body: '',
+    state: 'OPEN',
+  });
+  dependencies.reviewAlreadyPosted = async () => {
+    reconciliationCalls += 1;
+    return false;
+  };
+  dependencies.invokeMultiPassReview = async () => {
+    reviewerCalls += 1;
+    return { summary: 'reviewed', findings: [] };
+  };
+  dependencies.postReview = async () => {
+    postCalls += 1;
+  };
+
+  const result = await pollOnce(migrationPollOptions(root, dependencies));
+
+  assert.equal(result.failed, false);
+  assert.equal(result.reviewed, 0);
+  assert.equal(reviewerCalls, 0);
+  assert.equal(postCalls, 0);
+  assert.equal(reconciliationCalls, 0);
+  const persisted = JSON.parse(await readFile(stateFile, 'utf8'));
+  assert.equal(persisted[closedKey], undefined);
+  assert.equal(persisted[targetKey], undefined);
+  assert.deepEqual(persisted[scopedTargetKey], initialState[targetKey]);
+  assert.equal(
+    Object.keys(persisted).filter((key) => key !== STATE_METADATA_KEY).length,
+    MAX_REVIEW_STATE_ENTRIES,
+  );
+});
+
 function migrationDependencies({ authCalls, saveState } = {}) {
   return {
     createGitHubMutationQueue: () => ({
@@ -461,6 +536,13 @@ test('legacy over-cap expiry rolls back when its atomic save fails', async (t) =
   t.after(() => rm(root, { recursive: true, force: true }));
   const stateFile = path.join(root, 'state.json');
   const initialState = legacyOverCapState({ expired: true });
+  initialState[prKey('owner/repo', 2, account)].lastReviewedAt =
+    '2025-08-12T00:00:00.000Z';
+  initialState[`owner/repo#${MAX_REVIEW_STATE_ENTRIES + 2}`] = {
+    lastReviewedSha: 'legacy-marker-sha',
+    lastReviewedAt: '2026-08-11T00:00:00.000Z',
+    reviewMarkerVersion: 1,
+  };
   const serialized = JSON.stringify(initialState);
   await writeFile(stateFile, serialized);
   const authCalls = { count: 0 };
