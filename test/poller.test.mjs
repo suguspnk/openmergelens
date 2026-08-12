@@ -8,6 +8,7 @@ import path from 'node:path';
 import { pollOnce } from '../lib/poller.mjs';
 import {
   postReview as productionPostReview,
+  reviewAlreadyPosted as productionReviewAlreadyPosted,
   searchReviewRequestedPRs as productionSearchReviewRequestedPRs,
 } from '../lib/github.mjs';
 import {
@@ -25,6 +26,7 @@ import {
 import { MAX_CANDIDATE_METADATA_PER_POLL } from '../lib/poller.mjs';
 import {
   prKey,
+  reviewStateGcAfterKey,
   saveState,
   serializeState,
   STATE_METADATA_KEY,
@@ -3570,6 +3572,62 @@ test('a posted review is reconciled after state persistence fails without repost
   );
 });
 
+test('nullable unrelated history rows do not block poll rehydration', async (t) => {
+  const files = await fixture(t);
+  const events = [];
+  let diffCalls = 0;
+  let postCalls = 0;
+  const dependencies = successfulDependencies(events);
+  dependencies.reviewAlreadyPosted = (options) => productionReviewAlreadyPosted({
+    ...options,
+    request: async () => [
+      JSON.stringify({
+        body: null,
+        commit_id: null,
+        state: 'PENDING',
+        user_login: null,
+      }),
+      JSON.stringify({
+        body: `recovered\n${options.marker}`,
+        commit_id: options.commitId,
+        state: 'COMMENTED',
+        user_login: options.auth.username,
+      }),
+      JSON.stringify({
+        body: null,
+        commit_id: null,
+        state: 'DISMISSED',
+        user_login: null,
+      }),
+    ].join('\n'),
+  });
+  dependencies.getPullRequestDiff = async () => {
+    diffCalls += 1;
+    return '';
+  };
+  dependencies.postReview = async () => {
+    postCalls += 1;
+  };
+
+  const result = await pollOnce({
+    config: config([work]),
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, false);
+  assert.equal(result.reviewed, 1);
+  assert.equal(result.outcomes[0].status, 'recovered');
+  assert.equal(diffCalls, 0);
+  assert.equal(postCalls, 0);
+  assert.deepEqual(events.filter((event) => event.startsWith('review:')), []);
+  const state = JSON.parse(await readFile(files.stateFile, 'utf8'));
+  assert.equal(
+    state[prKey('owner/repo', 7, work)].lastReviewedSha,
+    'sha-1',
+  );
+});
+
 test('a review request revoked after generation skips posting without failing or recording', async (t) => {
   const files = await fixture(t);
   const events = [];
@@ -4646,8 +4704,9 @@ test('unproven capacity donors are retained when marker proof is absent', async 
   let postCalls = 0;
   const dependencies = successfulDependencies([]);
   dependencies.loadState = async () => fullState;
-  dependencies.saveState = async () => {
-    throw new Error('state must not be pruned');
+  let lastSaved;
+  dependencies.saveState = async (_path, nextState) => {
+    lastSaved = structuredClone(nextState);
   };
   dependencies.searchReviewRequestedPRs = async ({ repo }) => completeSearch(
     repo === 'other/repo' ? [{ repo, number: 1 }] : [],
@@ -4685,11 +4744,138 @@ test('unproven capacity donors are retained when marker proof is absent', async 
 
   assert.equal(result.failed, true);
   assert.equal(result.failures[0].note, 'review state capacity reached');
-  assert.equal(proofCalls, MAX_STATE_GC_CHECKS_PER_POLL);
+  assert.equal(proofCalls, MAX_STATE_GC_CHECKS_PER_POLL - 1);
   assert.equal(diffCalls, 0);
   assert.equal(reviewerCalls, 0);
   assert.equal(postCalls, 0);
   assert.ok(fullState[prKey('owner/repo', 1, donor)]);
+  assert.ok(reviewStateGcAfterKey(lastSaved));
+});
+
+test('marker-proof cursor reaches a later exact proof on the next poll without starving closure GC', async (t) => {
+  const files = await fixture(t);
+  const donor = { ...work, repositories: ['owner/repo'] };
+  const target = { ...personal, repositories: ['other/repo'] };
+  let persistedState = capacityState(MAX_REVIEW_STATE_ENTRIES, { account: donor });
+  for (const [index, entry] of Object.values(persistedState).entries()) {
+    entry.lastReviewedAt = new Date(
+      Date.parse('2026-08-05T00:00:00.000Z') +
+      (MAX_REVIEW_STATE_ENTRIES - index) * 1_000,
+    ).toISOString();
+  }
+  const proofOrder = Object.keys(persistedState).sort();
+  const exactProofKey = proofOrder[25];
+  const exactProofNumber = Number(exactProofKey.slice(exactProofKey.lastIndexOf('#') + 1));
+  const proofCalls = [];
+  let gcCalls = 0;
+
+  function dependenciesForPoll() {
+    const dependencies = successfulDependencies([]);
+    dependencies.loadState = async () => structuredClone(persistedState);
+    dependencies.saveState = async (_path, nextState) => {
+      persistedState = structuredClone(nextState);
+    };
+    dependencies.searchReviewRequestedPRs = async ({ repo }) => completeSearch(
+      repo === 'other/repo' ? [{ repo, number: 1 }] : [],
+    );
+    dependencies.getPullRequest = async ({ repo, number }) => ({
+      headRefOid: 'target-sha',
+      number,
+      title: 'Target PR',
+      url: `https://github.com/${repo}/pull/${number}`,
+      body: '',
+      state: 'OPEN',
+    });
+    dependencies.getPullRequestForStateGc = async ({ repo, number }) => {
+      gcCalls += 1;
+      return {
+        headRefOid: `sha-${number}`,
+        number,
+        title: 'Tracked PR',
+        url: `https://github.com/${repo}/pull/${number}`,
+        body: '',
+        state: 'OPEN',
+      };
+    };
+    dependencies.reviewAlreadyPosted = async ({ repo, number }) => {
+      if (repo !== 'owner/repo') return false;
+      const key = prKey(repo, number, donor);
+      proofCalls.push(key);
+      return number === exactProofNumber;
+    };
+    return dependencies;
+  }
+
+  const first = await pollOnce({
+    config: config([donor, target]),
+    ...files,
+    dependencies: dependenciesForPoll(),
+  });
+  assert.equal(first.failed, true);
+  assert.equal(first.failures[0].note, 'review state capacity reached');
+  assert.deepEqual(proofCalls, proofOrder.slice(0, 24));
+  assert.equal(reviewStateGcAfterKey(persistedState), proofOrder[23]);
+  assert.equal(gcCalls, 1);
+  for (const key of proofOrder) assert.ok(persistedState[key]);
+
+  const second = await pollOnce({
+    config: config([donor, target]),
+    ...files,
+    dependencies: dependenciesForPoll(),
+  });
+  assert.equal(second.failed, false);
+  assert.deepEqual(proofCalls.slice(24), proofOrder.slice(24, 26));
+  assert.equal(persistedState[exactProofKey], undefined);
+  assert.equal(
+    persistedState[prKey('other/repo', 1, target)].lastReviewedSha,
+    'target-sha',
+  );
+  assert.ok(gcCalls > 1);
+});
+
+test('marker-proof cursor rolls back in memory when its atomic save fails', async (t) => {
+  const files = await fixture(t);
+  const donor = { ...work, repositories: ['owner/repo'] };
+  const target = { ...personal, repositories: ['other/repo'] };
+  const fullState = capacityState(MAX_REVIEW_STATE_ENTRIES, { account: donor });
+  await saveState(files.stateFile, fullState);
+  const savedStates = [];
+  let observedLiveState;
+  let saveCalls = 0;
+  const dependencies = successfulDependencies([]);
+  dependencies.saveState = async (_path, nextState) => {
+    saveCalls += 1;
+    observedLiveState = nextState;
+    savedStates.push(structuredClone(nextState));
+    if (saveCalls === 1) throw new Error('disk full');
+  };
+  dependencies.searchReviewRequestedPRs = async ({ repo }) => completeSearch(
+    repo === 'other/repo' ? [{ repo, number: 1 }] : [],
+  );
+  dependencies.getPullRequest = async ({ repo, number }) => ({
+    headRefOid: 'target-sha',
+    number,
+    title: 'Target PR',
+    url: `https://github.com/${repo}/pull/${number}`,
+    body: '',
+    state: 'OPEN',
+  });
+  dependencies.reviewAlreadyPosted = async () => false;
+
+  const result = await pollOnce({
+    config: config([donor, target]),
+    ...files,
+    dependencies,
+  });
+
+  assert.equal(result.failed, true);
+  assert.equal(result.failures[0].note, 'review state capacity reached');
+  assert.ok(reviewStateGcAfterKey(savedStates[0]));
+  assert.equal(reviewStateGcAfterKey(observedLiveState), null);
+  for (const key of Object.keys(fullState)) {
+    assert.ok(observedLiveState[key]);
+  }
+  assert.deepEqual(JSON.parse(await readFile(files.stateFile, 'utf8')), fullState);
 });
 
 test('exact marker proof migrates and compacts an old donor before AI', async (t) => {

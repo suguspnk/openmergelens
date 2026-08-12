@@ -838,12 +838,18 @@ test('reviewAlreadyPosted rejects a forged marker from a different reviewer', as
   assert.equal(await reviewAlreadyPosted({ ...options, request }), false);
 });
 
-test('reviewAlreadyPosted rejects malformed rows even after an exact marker match', async () => {
+test('reviewAlreadyPosted ignores nullable unrelated rows around an exact marker match', async () => {
   const options = reviewOptions();
-  await assert.rejects(
-    reviewAlreadyPosted({
+  assert.equal(
+    await reviewAlreadyPosted({
       ...options,
       request: async () => [
+        JSON.stringify({
+          body: null,
+          commit_id: null,
+          state: 'PENDING',
+          user_login: null,
+        }),
         JSON.stringify({
           body: options.marker,
           commit_id: options.commitId,
@@ -852,14 +858,35 @@ test('reviewAlreadyPosted rejects malformed rows even after an exact marker matc
         }),
         JSON.stringify({
           body: null,
-          commit_id: options.commitId,
-          state: 'UNKNOWN',
-          user_login: options.auth.username,
+          commit_id: null,
+          state: 'DISMISSED',
+          user_login: null,
         }),
       ].join('\n'),
     }),
-    /review reconciliation response is malformed/u,
+    true,
   );
+});
+
+test('reviewAlreadyPosted still rejects invalid row schema after a match', async () => {
+  const options = reviewOptions();
+  await assert.rejects(reviewAlreadyPosted({
+    ...options,
+    request: async () => [
+      JSON.stringify({
+        body: options.marker,
+        commit_id: options.commitId,
+        state: 'COMMENTED',
+        user_login: options.auth.username,
+      }),
+      JSON.stringify({
+        body: null,
+        commit_id: null,
+        state: 'UNKNOWN',
+        user_login: null,
+      }),
+    ].join('\n'),
+  }), /review reconciliation response is malformed/u);
 });
 
 test('postReview does not retry a non-validation failure', async () => {
