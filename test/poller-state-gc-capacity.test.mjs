@@ -671,6 +671,67 @@ test('legacy repair rotates authenticated account batches after deadline exhaust
   assert.equal(authenticatedUsernames[0], 'work-6');
 });
 
+test('legacy auth rotation handles a byte-valid six-figure predecessor state', {
+  timeout: 15_000,
+}, async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-upgrade-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const stateFile = path.join(root, 'state.json');
+  const migrationAccounts = Array.from({ length: 6 }, (_, index) => ({
+    hostname: 'github.com',
+    username: String.fromCharCode('a'.charCodeAt(0) + index),
+    repositories: [`o/${String.fromCharCode('a'.charCodeAt(0) + index)}`],
+  }));
+  const firstAccount = migrationAccounts[0];
+  const entryCount = 110_001;
+  const state = Object.fromEntries(
+    Array.from({ length: entryCount }, (_, index) => [
+      prKey('o/a', index + 1, firstAccount),
+      {
+        lastReviewedSha: 's',
+        lastReviewedAt: '2026-08-11T00:00:00.000Z',
+      },
+    ]),
+  );
+  for (const laterAccount of migrationAccounts.slice(1)) {
+    state[prKey(laterAccount.repositories[0], 1, laterAccount)] = {
+      lastReviewedSha: 's',
+      lastReviewedAt: '2026-08-11T00:00:00.000Z',
+    };
+  }
+  const serialized = JSON.stringify(state);
+  assert.ok(Buffer.byteLength(serialized) < MAX_STATE_FILE_BYTES);
+  await writeFile(stateFile, serialized);
+  let clockCalls = 0;
+  const attemptedAccounts = [];
+  const dependencies = migrationDependencies();
+  dependencies.monotonicNow = () => {
+    clockCalls += 1;
+    return clockCalls <= 7 ? 0 : 15_000;
+  };
+  dependencies.resolveGitHubAuth = async (candidateAccount) => {
+    attemptedAccounts.push(candidateAccount.username);
+    throw new Error('simulated authentication timeout');
+  };
+  const options = migrationPollOptions(root, dependencies);
+  options.config.githubAccounts = migrationAccounts;
+  options.config.aiProcessingConsent = createAiProcessingConsent(
+    'reviewer',
+    options.config.githubAccounts,
+  );
+
+  const result = await pollOnce(options);
+
+  assert.equal(result.failed, true);
+  assert.deepEqual(attemptedAccounts, ['a', 'b', 'c', 'd', 'e']);
+  const persisted = JSON.parse(await readFile(stateFile, 'utf8'));
+  assert.equal(Object.keys(persisted).length, entryCount + 5);
+  assert.equal(
+    Object.keys(persisted)[0],
+    prKey('o/f', 1, migrationAccounts[5]),
+  );
+});
+
 test('legacy over-cap repair stops at its wall-clock deadline', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-upgrade-'));
   t.after(() => rm(root, { recursive: true, force: true }));
