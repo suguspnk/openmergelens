@@ -508,9 +508,11 @@ Each repair lookup is capped at five seconds, the repair window at 15 seconds,
 and three failed or malformed responses stop that poll's remote repair work.
 Authentication is scheduled in bounded batches only while the same end-to-end
 repair deadline remains live. Each authentication subprocess receives the
-remaining request timeout and, if it ignores graceful termination, its detached
-process tree is force-killed after a bounded grace period even when the leader
-exits first. Confirmed-deletion capacity is projected with
+remaining request timeout. On POSIX, a process that ignores graceful termination
+has its detached tree force-killed after a bounded grace period even when the
+leader exits first. On Windows, forced tree termination begins immediately at
+the timeout boundary while the leader PID still identifies its descendants.
+Confirmed-deletion capacity is projected with
 incremental exact entry and UTF-8 byte accounting rather than repeatedly
 serializing the full legacy state.
 If authentication consumes the deadline, all records for that attempted account

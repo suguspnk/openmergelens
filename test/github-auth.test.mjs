@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import {
   authEnvironment,
   parseAuthStatus,
@@ -85,6 +86,44 @@ test('GitHub auth timeout keeps tree kill armed after the leader exits', {
       process.kill(descendantPid, 'SIGKILL');
     }
   }
+});
+
+test('Windows auth timeout starts forced tree kill before the leader exits', {
+  timeout: 2_000,
+}, async () => {
+  const child = new EventEmitter();
+  child.pid = 4321;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  let leaderAlive = true;
+  let descendantAlive = true;
+  const terminationCalls = [];
+
+  const terminate = async (_child, { platform, force }) => {
+    terminationCalls.push({ platform, force, leaderAlive });
+    if (force && leaderAlive) descendantAlive = false;
+    leaderAlive = false;
+    process.nextTick(() => child.emit('close', 1, force ? 'SIGKILL' : 'SIGTERM'));
+  };
+
+  await assert.rejects(
+    runGitHubAuthCommand('gh', ['auth', 'status'], {
+      timeoutMs: 10,
+      environment: {},
+      platform: 'win32',
+      spawnProcess: () => child,
+      terminate,
+      hardKillGraceMs: 10,
+    }),
+    (err) => err?.code === 'ETIMEDOUT',
+  );
+
+  assert.deepEqual(terminationCalls, [{
+    platform: 'win32',
+    force: true,
+    leaderAlive: true,
+  }]);
+  assert.equal(descendantAlive, false);
 });
 
 test('parseAuthStatus returns every authenticated account and active state', () => {

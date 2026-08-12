@@ -32,7 +32,8 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
 - Kept byte-neutral predecessor repair persistable when pretty formatting would
   exceed 32 MiB, bounded six-figure cursor migration without argument spreading,
   and force-killed GitHub authentication trees that outlive their timeout or
-  leader process. Windows state paths now remain inside the private
+  leader process, starting Windows tree termination before the leader PID can
+  exit. Windows state paths now remain inside the private
   OpenMergeLens home where arbitrary parent ACLs cannot be verified portably.
 - Accepted valid human and unrelated `[bot]` requested-reviewer actors while
   failing malformed or mistyped actor rows closed. Hardened state canonicality,
