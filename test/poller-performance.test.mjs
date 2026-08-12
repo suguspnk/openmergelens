@@ -10,7 +10,11 @@ import {
   MAX_CONFIGURED_REVIEW_SCOPES,
   MAX_REVIEW_STATE_ENTRIES,
 } from '../lib/security-limits.mjs';
-import { prKey, STATE_METADATA_KEY } from '../lib/state.mjs';
+import {
+  prKey,
+  reviewStateGcAfterKey,
+  STATE_METADATA_KEY,
+} from '../lib/state.mjs';
 
 const validatedSearchResults = new WeakSet();
 
@@ -418,4 +422,287 @@ test('concurrent failed reservations do not transiently defer an existing-key re
     Object.keys(persistedState).filter((key) => key !== STATE_METADATA_KEY).length,
     MAX_REVIEW_STATE_ENTRIES,
   );
+});
+
+test('marker-proof cursor rotates across equally pressured donor scopes between polls', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-poller-proof-fairness-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const account = {
+    hostname: 'github.com',
+    username: 'work',
+    repositories: ['owner/a', 'owner/b', 'owner/target'],
+  };
+  const entriesPerDonor = MAX_REVIEW_STATE_ENTRIES / 2;
+  const donorEntries = (repo) => Array.from(
+    { length: entriesPerDonor },
+    (_, index) => [
+      prKey(repo, index + 1, account),
+      {
+        lastReviewedSha: `old-${index + 1}`,
+        lastReviewedAt: '2026-08-05T00:00:00.000Z',
+      },
+    ],
+  );
+  let persistedState = Object.fromEntries([
+    ...donorEntries('owner/a'),
+    ...donorEntries('owner/b'),
+  ]);
+  const donorAKeys = Object.keys(persistedState)
+    .filter((key) => key.startsWith('github.com@work::owner/a#'))
+    .sort();
+  const donorBKeys = Object.keys(persistedState)
+    .filter((key) => key.startsWith('github.com@work::owner/b#'))
+    .sort();
+  const exactProofKey = donorBKeys[12];
+  const exactProofNumber = parseInt(
+    exactProofKey.slice(exactProofKey.lastIndexOf('#') + 1),
+    10,
+  );
+  const proofCalls = [];
+  const silentLogger = {
+    child() { return this; },
+    info() {},
+    warn() {},
+    error() {},
+    output() {},
+  };
+  const config = {
+    configVersion: 5,
+    githubAccounts: [account],
+    aiProcessingConsent: createAiProcessingConsent('reviewer', [account]),
+    reviewerCommand: 'reviewer',
+    model: null,
+    reviewerInputMode: 'stdin',
+    reviewBatchSize: 1,
+    reviewFocusCount: 1,
+    stateFile: './state.json',
+  };
+
+  function dependenciesForPoll() {
+    return {
+      createGitHubMutationQueue: () => ({
+        run: async (operation) => operation(),
+      }),
+      createGitHubMutationCadence: () => ({
+        run: async (operation, { beforeStart } = {}) => {
+          if (beforeStart) await beforeStart();
+          return operation();
+        },
+      }),
+      resolveGitHubAuth: async () => ({ username: account.username }),
+      currentUsername: async ({ auth }) => auth.username,
+      isValidatedReviewRequestSearchResult: (results) =>
+        validatedSearchResults.has(results),
+      searchReviewRequestedPRs: async ({ repo }) => completeSearch(
+        repo === 'owner/target' ? [{ repo, number: 1 }] : [],
+      ),
+      getPullRequest: async ({ repo, number }) => ({
+        headRefOid: 'target-sha',
+        number,
+        title: 'Target PR',
+        url: `https://github.com/${repo}/pull/${number}`,
+        body: '',
+        state: 'OPEN',
+      }),
+      getPullRequestForStateGc: async ({ repo, number }) => ({
+        headRefOid: `old-${number}`,
+        number,
+        title: 'Tracked PR',
+        url: `https://github.com/${repo}/pull/${number}`,
+        body: '',
+        state: 'OPEN',
+      }),
+      getPullRequestDiff: async () => '@@ -0,0 +1 @@\n+line\n',
+      hasActiveReviewRequest: async () => true,
+      reviewAlreadyPosted: async ({ repo, number }) => {
+        if (repo === 'owner/target') return false;
+        proofCalls.push(prKey(repo, number, account));
+        return repo === 'owner/b' && number === exactProofNumber;
+      },
+      ensureReviewPrompt: async () => '/virtual/prompt.md',
+      readPrompt: async () => '{{diff}}',
+      readLearnings: async () => '',
+      invokeMultiPassReview: async () => ({ summary: 'reviewed', findings: [] }),
+      postReview: async ({ scheduleMutation }) => scheduleMutation(async () => {}),
+      loadState: async () => structuredClone(persistedState),
+      saveState: async (_stateFile, nextState) => {
+        persistedState = structuredClone(nextState);
+      },
+    };
+  }
+
+  async function runPoll() {
+    return pollOnce({
+      config,
+      stateFile: path.join(root, 'state.json'),
+      logPath: path.join(root, 'poll.log'),
+      defaultReviewPromptPath: path.join(root, 'template.md'),
+      logger: silentLogger,
+      dependencies: dependenciesForPoll(),
+    });
+  }
+
+  const first = await runPoll();
+  assert.equal(first.failed, true);
+  assert.equal(first.reviewed, 0);
+  assert.equal(first.failures[0].note, 'review state capacity reached');
+  assert.deepEqual(
+    proofCalls,
+    donorAKeys.slice(0, 12).flatMap((key, index) => [key, donorBKeys[index]]),
+  );
+  assert.equal(reviewStateGcAfterKey(persistedState), donorBKeys[11]);
+  for (const key of [...donorAKeys, ...donorBKeys]) assert.ok(persistedState[key]);
+
+  const second = await runPoll();
+  assert.equal(second.failed, false);
+  assert.equal(second.reviewed, 1);
+  assert.deepEqual(proofCalls.slice(24), [donorAKeys[12], exactProofKey]);
+  assert.equal(persistedState[exactProofKey], undefined);
+  assert.equal(
+    persistedState[prKey('owner/target', 1, account)].lastReviewedSha,
+    'target-sha',
+  );
+  assert.equal(
+    Object.keys(persistedState).filter((key) => key !== STATE_METADATA_KEY).length,
+    MAX_REVIEW_STATE_ENTRIES,
+  );
+});
+
+test('marker-proof cursor reaches a later exact proof on the next poll without starving closure GC', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-poller-proof-cursor-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const donor = {
+    hostname: 'github.com',
+    username: 'work',
+    repositories: ['owner/repo'],
+  };
+  const target = {
+    hostname: 'github.com',
+    username: 'personal',
+    repositories: ['other/repo'],
+  };
+  let persistedState = Object.fromEntries(
+    Array.from({ length: MAX_REVIEW_STATE_ENTRIES }, (_, index) => [
+      prKey('owner/repo', index + 1, donor),
+      {
+        lastReviewedSha: `old-${index + 1}`,
+        lastReviewedAt: new Date(
+          Date.parse('2026-08-05T00:00:00.000Z') +
+          (MAX_REVIEW_STATE_ENTRIES - index) * 1_000,
+        ).toISOString(),
+      },
+    ]),
+  );
+  const proofOrder = Object.keys(persistedState).sort();
+  const exactProofKey = proofOrder[25];
+  const exactProofNumber = Number(
+    exactProofKey.slice(exactProofKey.lastIndexOf('#') + 1),
+  );
+  const proofCalls = [];
+  let gcCalls = 0;
+  const silentLogger = {
+    child() { return this; },
+    info() {},
+    warn() {},
+    error() {},
+    output() {},
+  };
+  const config = {
+    configVersion: 5,
+    githubAccounts: [donor, target],
+    aiProcessingConsent: createAiProcessingConsent('reviewer', [donor, target]),
+    reviewerCommand: 'reviewer',
+    model: null,
+    reviewerInputMode: 'stdin',
+    reviewBatchSize: 1,
+    reviewFocusCount: 1,
+    stateFile: './state.json',
+  };
+
+  function dependenciesForPoll() {
+    return {
+      createGitHubMutationQueue: () => ({
+        run: async (operation) => operation(),
+      }),
+      createGitHubMutationCadence: () => ({
+        run: async (operation, { beforeStart } = {}) => {
+          if (beforeStart) await beforeStart();
+          return operation();
+        },
+      }),
+      resolveGitHubAuth: async (account) => ({ username: account.username }),
+      currentUsername: async ({ auth }) => auth.username,
+      isValidatedReviewRequestSearchResult: (results) =>
+        validatedSearchResults.has(results),
+      searchReviewRequestedPRs: async ({ repo }) => completeSearch(
+        repo === 'other/repo' ? [{ repo, number: 1 }] : [],
+      ),
+      getPullRequest: async ({ repo, number }) => ({
+        headRefOid: 'target-sha',
+        number,
+        title: 'Target PR',
+        url: `https://github.com/${repo}/pull/${number}`,
+        body: '',
+        state: 'OPEN',
+      }),
+      getPullRequestForStateGc: async ({ repo, number }) => {
+        gcCalls += 1;
+        return {
+          headRefOid: `sha-${number}`,
+          number,
+          title: 'Tracked PR',
+          url: `https://github.com/${repo}/pull/${number}`,
+          body: '',
+          state: 'OPEN',
+        };
+      },
+      getPullRequestDiff: async () => '@@ -0,0 +1 @@\n+line\n',
+      hasActiveReviewRequest: async () => true,
+      reviewAlreadyPosted: async ({ repo, number }) => {
+        if (repo !== 'owner/repo') return false;
+        const key = prKey(repo, number, donor);
+        proofCalls.push(key);
+        if (key === proofOrder[0]) throw new Error('HTTP 404: Not Found');
+        return number === exactProofNumber;
+      },
+      ensureReviewPrompt: async () => '/virtual/prompt.md',
+      readPrompt: async () => '{{diff}}',
+      readLearnings: async () => '',
+      invokeMultiPassReview: async () => ({ summary: 'reviewed', findings: [] }),
+      postReview: async ({ scheduleMutation }) => scheduleMutation(async () => {}),
+      loadState: async () => structuredClone(persistedState),
+      saveState: async (_stateFile, nextState) => {
+        persistedState = structuredClone(nextState);
+      },
+    };
+  }
+
+  async function runPoll() {
+    return pollOnce({
+      config,
+      stateFile: path.join(root, 'state.json'),
+      logPath: path.join(root, 'poll.log'),
+      defaultReviewPromptPath: path.join(root, 'template.md'),
+      logger: silentLogger,
+      dependencies: dependenciesForPoll(),
+    });
+  }
+
+  const first = await runPoll();
+  assert.equal(first.failed, true);
+  assert.equal(first.failures[0].note, 'review state capacity reached');
+  assert.deepEqual(proofCalls, proofOrder.slice(0, 24));
+  assert.equal(reviewStateGcAfterKey(persistedState), proofOrder[23]);
+  assert.equal(gcCalls, 1);
+  for (const key of proofOrder) assert.ok(persistedState[key]);
+
+  const second = await runPoll();
+  assert.equal(second.failed, false);
+  assert.deepEqual(proofCalls.slice(24), proofOrder.slice(24, 26));
+  assert.equal(persistedState[exactProofKey], undefined);
+  assert.equal(
+    persistedState[prKey('other/repo', 1, target)].lastReviewedSha,
+    'target-sha',
+  );
+  assert.ok(gcCalls > 1);
 });
