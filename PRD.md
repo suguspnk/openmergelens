@@ -472,6 +472,11 @@ characters, require canonical ISO timestamps no more than five minutes in the
 future, and optionally carry only `reviewMarkerVersion: 1`. Invalid state is
 left untouched and fails before authentication or GitHub work.
 
+One legacy file containing more than 10,000 otherwise valid records can upgrade
+only when deterministic 365-day expiry reduces it to the current limit. That
+repair is saved atomically before authentication; malformed or still-active
+excess records fail closed instead of being pruned arbitrarily.
+
 One shared serializer measures exact pretty-printed UTF-8 output for both
 admission and the atomic temporary-file save. Configuration is limited to
 10,000 canonical account/repository scopes independent of an account selector.
