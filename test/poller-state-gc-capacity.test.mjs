@@ -515,13 +515,19 @@ test('active legacy over-cap state rotates one bounded authenticated window', as
   for (const key of Object.keys(initialState)) assert.ok(persisted[key]);
 });
 
-test('legacy over-cap repair reaches a closed entry beyond the first window', async (t) => {
+test('legacy over-cap repair accumulates closed entries across windows', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-upgrade-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const stateFile = path.join(root, 'state.json');
   const initialState = legacyOverCapState();
+  initialState[prKey('owner/repo', MAX_REVIEW_STATE_ENTRIES + 2, account)] = {
+    lastReviewedSha: `sha-${MAX_REVIEW_STATE_ENTRIES + 2}`,
+    lastReviewedAt: '2026-08-11T00:00:00.000Z',
+  };
   await writeFile(stateFile, JSON.stringify(initialState));
-  const closedKey = prKey('owner/repo', 1_001, account);
+  const firstClosedKey = prKey('owner/repo', 1, account);
+  const laterClosedKey = prKey('owner/repo', 1_001, account);
+  const closedKeys = new Set([firstClosedKey, laterClosedKey]);
   const checked = [];
   const authCalls = { count: 0 };
   const dependencies = migrationDependencies({ authCalls });
@@ -534,28 +540,77 @@ test('legacy over-cap repair reaches a closed entry beyond the first window', as
       title: 'Tracked PR',
       url: `https://github.com/${repo}/pull/${number}`,
       body: '',
-      state: key === closedKey ? 'CLOSED' : 'OPEN',
+      state: closedKeys.has(key) ? 'CLOSED' : 'OPEN',
     };
   };
 
   const first = await pollOnce(migrationPollOptions(root, dependencies));
   assert.equal(first.failed, true);
   assert.equal(checked.length, 1_000);
-  assert.ok(!checked.includes(closedKey));
+  assert.ok(!checked.includes(laterClosedKey));
   const rotated = JSON.parse(await readFile(stateFile, 'utf8'));
-  assert.equal(Object.keys(rotated)[0], closedKey);
+  assert.equal(rotated[firstClosedKey], undefined);
+  assert.equal(Object.keys(rotated)[0], laterClosedKey);
   assert.equal(Object.keys(rotated).length, MAX_REVIEW_STATE_ENTRIES + 1);
 
   const second = await pollOnce(migrationPollOptions(root, dependencies));
   assert.equal(second.failed, false);
   assert.equal(authCalls.count, 2);
-  assert.equal(checked[1_000], closedKey);
+  assert.equal(checked[1_000], laterClosedKey);
   const repaired = JSON.parse(await readFile(stateFile, 'utf8'));
-  assert.equal(repaired[closedKey], undefined);
+  assert.equal(repaired[firstClosedKey], undefined);
+  assert.equal(repaired[laterClosedKey], undefined);
   assert.equal(
     Object.keys(repaired).filter((key) => key !== STATE_METADATA_KEY).length,
     MAX_REVIEW_STATE_ENTRIES,
   );
+});
+
+test('legacy over-cap repair adopts and checks an all-unscoped state', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-upgrade-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const stateFile = path.join(root, 'state.json');
+  const initialState = Object.fromEntries(
+    Array.from({ length: MAX_REVIEW_STATE_ENTRIES + 1 }, (_, index) => [
+      `owner/repo#${index + 1}`,
+      {
+        lastReviewedSha: `sha-${index + 1}`,
+        lastReviewedAt: '2026-08-11T00:00:00.000Z',
+      },
+    ]),
+  );
+  await writeFile(stateFile, JSON.stringify(initialState));
+  const checked = [];
+  const authCalls = { count: 0 };
+  const dependencies = migrationDependencies({ authCalls });
+  dependencies.getPullRequestForStateGc = async ({ repo, number }) => {
+    checked.push(prKey(repo, number, account));
+    return {
+      headRefOid: `sha-${number}`,
+      number,
+      title: 'Tracked PR',
+      url: `https://github.com/${repo}/pull/${number}`,
+      body: '',
+      state: number === 1 ? 'CLOSED' : 'OPEN',
+    };
+  };
+
+  const result = await pollOnce(migrationPollOptions(root, dependencies));
+
+  assert.equal(result.failed, false);
+  assert.equal(authCalls.count, 1);
+  assert.equal(checked[0], prKey('owner/repo', 1, account));
+  const persisted = JSON.parse(await readFile(stateFile, 'utf8'));
+  assert.equal(persisted['owner/repo#1'], undefined);
+  assert.equal(persisted[prKey('owner/repo', 1, account)], undefined);
+  assert.equal(
+    Object.keys(persisted).filter((key) => key !== STATE_METADATA_KEY).length,
+    MAX_REVIEW_STATE_ENTRIES,
+  );
+  for (const key of Object.keys(persisted)) {
+    if (key === STATE_METADATA_KEY) continue;
+    assert.match(key, /^github\.com@work::owner\/repo#[1-9][0-9]*$/u);
+  }
 });
 
 test('legacy over-cap repair performs no authenticated work without consent', async (t) => {
@@ -595,6 +650,10 @@ test('legacy over-cap repair progress rolls back when its save fails', async (t)
   t.after(() => rm(root, { recursive: true, force: true }));
   const stateFile = path.join(root, 'state.json');
   const initialState = legacyOverCapState();
+  initialState[prKey('owner/repo', MAX_REVIEW_STATE_ENTRIES + 2, account)] = {
+    lastReviewedSha: `sha-${MAX_REVIEW_STATE_ENTRIES + 2}`,
+    lastReviewedAt: '2026-08-11T00:00:00.000Z',
+  };
   const serialized = JSON.stringify(initialState);
   await writeFile(stateFile, serialized);
   let saveOptions;
@@ -603,6 +662,14 @@ test('legacy over-cap repair progress rolls back when its save fails', async (t)
       saveOptions = options;
       throw new Error('disk full');
     },
+  });
+  dependencies.getPullRequestForStateGc = async ({ repo, number }) => ({
+    headRefOid: `sha-${number}`,
+    number,
+    title: 'Tracked PR',
+    url: `https://github.com/${repo}/pull/${number}`,
+    body: '',
+    state: number === 1 ? 'CLOSED' : 'OPEN',
   });
 
   const result = await pollOnce(migrationPollOptions(root, dependencies));
