@@ -46,6 +46,7 @@ import {
   MAX_REVIEW_STATE_ENTRIES,
   MAX_REVIEW_STATE_KEY_CHARS,
   MAX_REVIEW_STATE_SHA_CHARS,
+  MAX_REVIEW_STATE_TEMPORARIES,
   MAX_STATE_FILE_BYTES,
 } from '../lib/security-limits.mjs';
 
@@ -1157,6 +1158,62 @@ test('permission hardening failure leaves the previous state committed', async (
   } else {
     assert.deepEqual(names, ['state.json']);
   }
+});
+
+test('Windows retained replacement files are bounded without unsafe scavenging', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const replacement = {
+    [prKey('owner/repo', 1, reviewer)]: {
+      lastReviewedSha: 'sha-1',
+      lastReviewedAt: '2026-07-28T00:00:00.000Z',
+    },
+  };
+  const retainedFailure = /simulated pre-rename failure/u;
+  let hardenCalls = 0;
+  const saveOptions = {
+    platform: 'win32',
+    hardenHandle: async () => {
+      hardenCalls += 1;
+      throw new Error('simulated pre-rename failure');
+    },
+  };
+
+  for (let attempt = 0; attempt < MAX_REVIEW_STATE_TEMPORARIES; attempt += 1) {
+    await assert.rejects(saveState(stateFile, replacement, saveOptions), retainedFailure);
+  }
+
+  const temporaryNames = (await readdir(directory))
+    .filter((name) => name.includes('.tmp-'));
+  assert.equal(temporaryNames.length, MAX_REVIEW_STATE_TEMPORARIES);
+  const retainedBytes = await Promise.all(
+    temporaryNames.map(async (name) => (await stat(path.join(directory, name))).size),
+  );
+  assert.equal(
+    retainedBytes.reduce((total, size) => total + size, 0) <=
+      MAX_REVIEW_STATE_TEMPORARIES * Buffer.byteLength(JSON.stringify(replacement, null, 2) + '\n'),
+    true,
+  );
+
+  // A generated-looking entry that was not created by this save is never
+  // scavenged. The cap check fails before another open can occur, leaving the
+  // unverified entry untouched for an operator to inspect or remove safely.
+  const unverifiedPath = path.join(
+    directory,
+    'state.json.tmp-123-12345678-1234-4123-8123-123456789abc',
+  );
+  await writeFile(unverifiedPath, 'operator evidence\n');
+  await assert.rejects(
+    saveState(stateFile, replacement, saveOptions),
+    /temporary retention limit reached/u,
+  );
+  assert.equal(hardenCalls, MAX_REVIEW_STATE_TEMPORARIES);
+  assert.equal(await readFile(unverifiedPath, 'utf8'), 'operator evidence\n');
+  assert.equal(
+    (await readdir(directory)).filter((name) => name.includes('.tmp-')).length,
+    MAX_REVIEW_STATE_TEMPORARIES + 1,
+  );
 });
 
 test('temporary-path replacement cannot chmod a victim or replace state', {
