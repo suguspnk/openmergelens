@@ -13,6 +13,7 @@ import {
   rm,
   stat,
   symlink,
+  utimes,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -1388,6 +1389,23 @@ test('Windows retention cap uses one parent marker across processes and state fi
     namesAfterRetries.filter((name) => name.includes('.blocked-')).length,
     0,
   );
+});
+
+test('Windows retention recovers an orphan empty lock after an owner crash', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-orphan-lock-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const lockPath = path.join(directory, '.openmergelens-retention.lock');
+  await writeFile(lockPath, '');
+  const stale = new Date(Date.now() - 60_000);
+  await utimes(lockPath, stale, stale);
+
+  const result = await saveState(path.join(directory, 'state.json'), {}, {
+    platform: 'win32',
+  });
+  assert.equal(result.committed, true);
+  const names = await readdir(directory);
+  assert.equal(names.includes('.openmergelens-retention.lock'), false);
+  assert.equal(names.some((name) => /\.tmp-\d+-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(name)), true);
 });
 
 for (const markerFailure of [

@@ -345,6 +345,29 @@ test('terminateProcessTree rejects when POSIX group and leader termination both 
   );
 });
 
+test('terminateProcessTree rejects when POSIX leader kill reports no signal', async (t) => {
+  const groupFailure = Object.assign(new Error('group kill denied'), { code: 'EPERM' });
+  t.mock.method(process, 'kill', () => { throw groupFailure; });
+  const target = {
+    pid: 4321,
+    kill() { return false; },
+  };
+
+  await assert.rejects(
+    terminateProcessTree(target, {
+      platform: 'linux',
+      force: true,
+    }),
+    (err) => {
+      assert.equal(err?.code, 'ETERMINATE');
+      assert.equal(err?.pid, 4321);
+      assert.equal(err?.cause, groupFailure);
+      assert.equal(err?.leaderCause?.code, 'ESRCH');
+      return true;
+    },
+  );
+});
+
 test('terminateProcessTree uses taskkill for a forced Windows tree stop', async () => {
   let invocation;
   const spawnProcess = (command, args, options) => {
