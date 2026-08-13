@@ -134,17 +134,15 @@ test('file identity requires exact bigint dev and ino values', () => {
     ),
     false,
   );
-  // Windows path and handle stats can report different volume identifiers;
-  // the exact bigint file index is the stable object identity across both
-  // calls. Numeric Stats values validate safe volume/file values; path-to-path
-  // checks use the complete safe tuple.
-  assert.equal(
-    sameFileIdentity(
+  // Windows file indexes are volume-scoped; a differing volume is never the
+  // same object, even when the inode matches.
+  assert.throws(
+    () => sameFileIdentity(
       identityStats({ dev: 11n, ino: 22n }),
       identityStats({ dev: 99n, ino: 22n }),
       { platform: 'win32' },
     ),
-    true,
+    /identity is unsupported on this Windows filesystem/u,
   );
   assert.throws(
     () => sameFileIdentity(
@@ -173,12 +171,10 @@ test('file identity requires exact bigint dev and ino values', () => {
     ),
     true,
   );
-  // A hosted Windows descriptor can report a numeric volume while its
-  // pathname observation reports a bigint volume (or vice versa). The file
-  // index still binds those handle/path observations even when the dev values
-  // differ; pathname-to-pathname checks below retain the volume requirement.
-  assert.equal(
-    sameFileIdentity(
+  // Mixed numeric/BigInt observations must still agree on volume; equal
+  // volume-local indexes from different volumes are not the same object.
+  assert.throws(
+    () => sameFileIdentity(
       identityStats({ dev: 11, ino: 22 }),
       identityStats({ dev: 99n, ino: 22n }),
       {
@@ -187,7 +183,7 @@ test('file identity requires exact bigint dev and ino values', () => {
         allowMixedHandlePathVolume: true,
       },
     ),
-    true,
+    /identity is unsupported on this Windows filesystem/u,
   );
   assert.throws(
     () => sameFileIdentity(
