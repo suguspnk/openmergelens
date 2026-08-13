@@ -388,6 +388,19 @@ test('terminateProcessTree uses taskkill for a forced Windows tree stop', async 
   assert.equal(invocation.options.shell, false);
 });
 
+test('terminateProcessTree rejects a false Windows graceful signal', async () => {
+  await assert.rejects(
+    terminateProcessTree({
+      pid: 4321,
+      kill() { return false; },
+    }, {
+      platform: 'win32',
+      force: false,
+    }),
+    (error) => error?.code === 'ETERMINATE' && error?.pid === 4321,
+  );
+});
+
 for (const failure of [
   {
     name: 'an asynchronous taskkill error',

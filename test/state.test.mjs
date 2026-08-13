@@ -1408,6 +1408,61 @@ test('Windows retention recovers an orphan empty lock after an owner crash', asy
   assert.equal(names.some((name) => /\.tmp-\d+-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(name)), true);
 });
 
+test('Windows retention relocates a claimed marker when owner payload acquisition fails', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-owner-failure-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const lockPath = path.join(directory, '.openmergelens-retention.lock');
+  let lockOpens = 0;
+  const openWithPayloadFailure = async (...args) => {
+    if (args[0] === lockPath) {
+      lockOpens += 1;
+      if (lockOpens === 2) {
+        throw Object.assign(new Error('owner payload open failure'), { code: 'EIO' });
+      }
+    }
+    return open(...args);
+  };
+
+  await assert.rejects(
+    saveState(stateFile, {}, {
+      platform: 'win32',
+      openFile: openWithPayloadFailure,
+    }),
+    /owner payload open failure/u,
+  );
+  const names = await readdir(directory);
+  assert.equal(names.includes('.openmergelens-retention.lock'), false);
+  assert.equal(
+    names.some((name) => name.startsWith('state.json.tmp-')),
+    true,
+    'the claimed inode is retained as evidence instead of leaking the lock pathname',
+  );
+});
+
+test('Windows retention reclaims a stale PID only after process-start identity mismatch', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-pid-reuse-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const lockPath = path.join(directory, '.openmergelens-retention.lock');
+  const staleAt = Date.now() - 60_000;
+  await writeFile(lockPath, JSON.stringify({
+    version: 1,
+    pid: process.pid,
+    createdAt: staleAt,
+    startIdentity: 'old-process-start',
+  }) + '\n');
+  const staleDate = new Date(staleAt);
+  await utimes(lockPath, staleDate, staleDate);
+
+  const result = await saveState(stateFile, {}, {
+    platform: 'win32',
+    getProcessStartIdentity: async () => 'new-process-start',
+  });
+  assert.equal(result.committed, true);
+  assert.equal((await readdir(directory)).includes('.openmergelens-retention.lock'), false);
+});
+
 for (const markerFailure of [
   {
     name: 'truncate failure',
