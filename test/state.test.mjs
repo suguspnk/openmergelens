@@ -1390,6 +1390,149 @@ test('Windows retention cap uses one parent marker across processes and state fi
   );
 });
 
+for (const failure of [
+  {
+    name: 'readdir failure',
+    option: (directory) => {
+      let failed = false;
+      return {
+        readdir: async (...args) => {
+          if (!failed && args[0] === directory) {
+            failed = true;
+            throw Object.assign(new Error('transient retention listing failure'), {
+              code: 'EIO',
+            });
+          }
+          return readdir(...args);
+        },
+      };
+    },
+    error: /transient retention listing failure/u,
+  },
+  {
+    name: 'parent identity failure',
+    option: (directory) => {
+      let parentChecks = 0;
+      return {
+        lstat: async (...args) => {
+          if (args[0] === directory) {
+            parentChecks += 1;
+            if (parentChecks === 2) {
+              throw Object.assign(new Error('transient retention identity failure'), {
+                code: 'EIO',
+              });
+            }
+          }
+          // Hosted POSIX paths are used to model the Windows platform. The
+          // Windows ancestor walk normalizes them to backslashes; keep that
+          // synthetic walk on the same verified directory rather than asking
+          // the POSIX filesystem for a literal backslash path.
+          if (typeof args[0] === 'string' && args[0].includes('\\')) {
+            return lstat(directory, args[1]);
+          }
+          return lstat(...args);
+        },
+      };
+    },
+    error: /transient retention identity failure/u,
+  },
+  {
+    name: 'reservation rename failure',
+    option: () => {
+      let failed = false;
+      return {
+        reserveRename: async (...args) => {
+          if (!failed) {
+            failed = true;
+            throw Object.assign(new Error('transient retention rename failure'), {
+              code: 'EIO',
+            });
+          }
+          return rename(...args);
+        },
+      };
+    },
+    error: /transient retention rename failure/u,
+  },
+]) {
+  test(`Windows retention lock recovers after a transient ${failure.name}`, async (t) => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-recovery-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const stateFile = path.join(directory, 'state.json');
+    const options = {
+      platform: 'win32',
+      ...failure.option(directory),
+    };
+
+    await assert.rejects(saveState(stateFile, {}, options), failure.error);
+    const afterFailure = await readdir(directory);
+    assert.equal(afterFailure.includes('.openmergelens-retention.lock'), false);
+    assert.equal(afterFailure.filter((name) => name.includes('.tmp-')).length, 1);
+
+    const result = await saveState(stateFile, {}, options);
+    assert.equal(result.committed, true);
+    const afterRetry = await readdir(directory);
+    assert.equal(afterRetry.includes('state.json'), true);
+    assert.equal(afterRetry.includes('.openmergelens-retention.lock'), false);
+  });
+}
+
+test('Windows retention marker probe rejects an oversized marker without reading its body', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-oversized-marker-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  await writeFile(
+    path.join(directory, '.openmergelens-retention.lock'),
+    Buffer.alloc(16 * 1024 * 1024, 0x61),
+  );
+
+  await assert.rejects(
+    saveState(stateFile, {}, { platform: 'win32' }),
+    /retention lock is oversized/u,
+  );
+  assert.deepEqual(
+    (await readdir(directory)).sort(),
+    ['.openmergelens-retention.lock'],
+  );
+});
+
+test('Windows retention marker probe rejects a non-regular marker', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-directory-marker-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  await mkdir(path.join(directory, '.openmergelens-retention.lock'));
+
+  await assert.rejects(
+    saveState(stateFile, {}, { platform: 'win32' }),
+    /retention lock must be a regular file/u,
+  );
+  assert.deepEqual(
+    (await readdir(directory)).sort(),
+    ['.openmergelens-retention.lock'],
+  );
+});
+
+test('Windows retention marker probe rejects a no-follow replacement race', {
+  skip: process.platform === 'win32',
+}, async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-symlink-marker-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const victim = path.join(directory, 'victim.txt');
+  await writeFile(victim, 'operator evidence\n');
+  await symlink(victim, path.join(directory, '.openmergelens-retention.lock'));
+
+  await assert.rejects(
+    saveState(stateFile, {}, { platform: 'win32' }),
+    /retention lock is not a safe regular file/u,
+  );
+  assert.equal(await readFile(victim, 'utf8'), 'operator evidence\n');
+  assert.equal(
+    (await lstat(path.join(directory, '.openmergelens-retention.lock'))).isSymbolicLink(),
+    true,
+  );
+});
+
 test('temporary-path replacement cannot chmod a victim or replace state', {
   skip: process.platform === 'win32',
 }, async (t) => {

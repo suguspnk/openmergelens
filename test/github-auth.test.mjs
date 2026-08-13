@@ -211,6 +211,7 @@ test('resolveGitHubAuth preserves a sanitized abnormal token-command failure', a
   const terminationFailure = Object.assign(new Error(`cleanup failed: ${secret}`), {
     code: 'ETERMINATE',
     timeoutCode: 'ETIMEDOUT',
+    overflowCode: 'EOVERFLOW',
     stdout: secret,
     stderr: `token=${secret}`,
   });
@@ -223,8 +224,10 @@ test('resolveGitHubAuth preserves a sanitized abnormal token-command failure', a
     (err) => {
       assert.equal(err.code, 'EGITHUBAUTHCOMMAND');
       assert.equal(err.failureCode, 'ETERMINATE');
+      assert.equal(err.overflowCode, 'EOVERFLOW');
       assert.equal(err.cause?.code, 'ETERMINATE');
       assert.equal(err.cause?.timeoutCode, 'ETIMEDOUT');
+      assert.equal(err.cause?.overflowCode, 'EOVERFLOW');
       assert.equal(err.cause?.cause, undefined);
       assert.equal('stdout' in err, false);
       assert.equal('stderr' in err, false);

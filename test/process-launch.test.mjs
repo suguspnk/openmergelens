@@ -321,6 +321,30 @@ test('terminateProcessTree uses a process group on POSIX', async (t) => {
   assert.deepEqual(signals, [{ pid: -4321, signal: 'SIGKILL' }]);
 });
 
+test('terminateProcessTree rejects when POSIX group and leader termination both fail', async (t) => {
+  const groupFailure = Object.assign(new Error('group kill denied'), { code: 'EPERM' });
+  const leaderFailure = Object.assign(new Error('leader kill denied'), { code: 'ESRCH' });
+  t.mock.method(process, 'kill', () => { throw groupFailure; });
+  const target = {
+    pid: 4321,
+    kill() { throw leaderFailure; },
+  };
+
+  await assert.rejects(
+    terminateProcessTree(target, {
+      platform: 'linux',
+      force: true,
+    }),
+    (err) => {
+      assert.equal(err?.code, 'ETERMINATE');
+      assert.equal(err?.pid, 4321);
+      assert.equal(err?.cause, groupFailure);
+      assert.equal(err?.leaderCause, leaderFailure);
+      return true;
+    },
+  );
+});
+
 test('terminateProcessTree uses taskkill for a forced Windows tree stop', async () => {
   let invocation;
   const spawnProcess = (command, args, options) => {
