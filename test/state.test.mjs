@@ -162,6 +162,25 @@ test('file identity requires exact bigint dev and ino values', () => {
     ),
     true,
   );
+  // Hosted Windows Node versions can mix numeric and bigint Stats values
+  // between a descriptor and its pathname. Safe numeric fields normalize to
+  // exact bigint values; an imprecise numeric value remains unsupported.
+  assert.equal(
+    sameFileIdentity(
+      identityStats({ dev: 11, ino: 22 }),
+      identityStats({ dev: 11n, ino: 22n }),
+      { platform: 'win32', requireVolumeMatch: true },
+    ),
+    true,
+  );
+  assert.throws(
+    () => sameFileIdentity(
+      identityStats({ dev: 11, ino: 22 }),
+      identityStats({ dev: 11n, ino: 23n }),
+      { platform: 'win32' },
+    ),
+    /identity is unsupported on this Windows filesystem/u,
+  );
   assert.equal(
     samePathIdentity(
       identityStats({ dev: 11, ino: 22 }),

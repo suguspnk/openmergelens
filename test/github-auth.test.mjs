@@ -368,59 +368,47 @@ test('GitHub auth surfaces a POSIX forced tree termination failure', {
 });
 
 test('GitHub auth timeout keeps tree kill armed after the leader exits', {
-  skip: process.platform === 'win32',
   timeout: 3_000,
 }, async () => {
-  let descendantPid;
-  const exists = (pid) => {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch (err) {
-      if (err.code === 'ESRCH') return false;
-      throw err;
-    }
+  // Inject the leader/descendant lifecycle instead of relying on hosted
+  // macOS process-group scheduling. The graceful stop exits the leader but
+  // intentionally leaves a descendant alive; the hard tree kill must remain
+  // armed after the leader's close event and clear that descendant before the
+  // command settles. This keeps production cleanup/error semantics unchanged
+  // while making the lifecycle assertion deterministic on Node 22 ARM.
+  const child = new EventEmitter();
+  child.pid = 4321;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  let leaderAlive = true;
+  let descendantAlive = true;
+  const terminationCalls = [];
+  const terminate = async (_target, { platform, force }) => {
+    terminationCalls.push({ platform, force, leaderAlive, descendantAlive });
+    leaderAlive = false;
+    if (force) descendantAlive = false;
+    if (!force) process.nextTick(() => child.emit('close', 0, 'SIGTERM'));
   };
 
-  try {
-    let timeoutError;
-    await assert.rejects(
-      runGitHubAuthCommand(
-        process.execPath,
-        [
-          '-e',
-          [
-            'const {spawn}=require("node:child_process")',
-            'const child=spawn(process.execPath,["-e","process.on(\\"SIGTERM\\",()=>{});setInterval(()=>{},1000)"],{stdio:"ignore"})',
-            'process.stdout.write(String(child.pid)+"\\n")',
-            'process.on("SIGTERM",()=>process.exit(0))',
-            'setInterval(()=>{},1000)',
-          ].join(';'),
-        ],
-        {
-          timeoutMs: 100,
-          environment: process.env,
-          hardKillGraceMs: 50,
-        },
-      ).catch((err) => {
-        timeoutError = err;
-        throw err;
-      }),
-      (err) => err?.code === 'ETIMEDOUT',
-    );
-    descendantPid = Number.parseInt(timeoutError.stdout.trim(), 10);
-    assert.ok(Number.isInteger(descendantPid));
+  const invocation = runGitHubAuthCommand('gh', ['auth', 'status'], {
+    timeoutMs: 10,
+    environment: {},
+    platform: 'darwin',
+    spawnProcess: () => child,
+    terminate,
+    hardKillGraceMs: 10,
+  });
 
-    const exitDeadline = Date.now() + 1_000;
-    while (exists(descendantPid) && Date.now() < exitDeadline) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    assert.equal(exists(descendantPid), false);
-  } finally {
-    if (Number.isInteger(descendantPid) && exists(descendantPid)) {
-      process.kill(descendantPid, 'SIGKILL');
-    }
-  }
+  await assert.rejects(
+    invocation,
+    (err) => err?.code === 'ETIMEDOUT' && err?.signal === 'SIGKILL',
+  );
+  assert.deepEqual(terminationCalls, [
+    { platform: 'darwin', force: false, leaderAlive: true, descendantAlive: true },
+    { platform: 'darwin', force: true, leaderAlive: false, descendantAlive: true },
+  ]);
+  assert.equal(leaderAlive, false);
+  assert.equal(descendantAlive, false);
 });
 
 test('Windows auth timeout starts forced tree kill before the leader exits', {
