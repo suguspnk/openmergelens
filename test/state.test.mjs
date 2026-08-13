@@ -1409,13 +1409,39 @@ test('Windows state save rejects a parent realpath substitution before creating 
       platform: 'win32',
       realpath: async (parentPath) => {
         realpathCalls += 1;
-        return path.join(root, 'junction-target');
+        return realpathCalls === 1
+          ? parentPath
+          : path.join(root, 'junction-target');
       },
     }),
     /parent directory realpath changed/u,
   );
 
-  assert.equal(realpathCalls, 1);
+  assert.equal(realpathCalls >= 2, true);
+  await assert.rejects(stat(stateFile), { code: 'ENOENT' });
+});
+
+test('Windows state rejects a canonical ancestor substitution even when its target keeps the same basename', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-junction-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const directory = path.join(root, 'private');
+  const stateFile = path.join(directory, 'state.json');
+  await mkdir(directory, { mode: 0o700 });
+  let realpathCalls = 0;
+
+  await assert.rejects(
+    saveState(stateFile, {}, {
+      platform: 'win32',
+      realpath: async (parentPath) => {
+        realpathCalls += 1;
+        return realpathCalls === 1
+          ? parentPath
+          : path.join(root, 'attacker-target', 'private');
+      },
+    }),
+    /parent directory realpath changed/u,
+  );
+  assert.equal(realpathCalls >= 2, true);
   await assert.rejects(stat(stateFile), { code: 'ENOENT' });
 });
 

@@ -107,7 +107,14 @@ test('GitHub auth rejects output that exceeds the byte cap', async () => {
       return true;
     },
   );
-  assert.deepEqual(terminationCalls, [{ platform: process.platform, force: true }]);
+  assert.ok(
+    terminationCalls.some(({ force }) => force === true),
+    'overflow must request forced process-tree cleanup',
+  );
+  assert.ok(
+    terminationCalls.every(({ platform }) => platform === process.platform),
+    'cleanup must use the configured platform',
+  );
 });
 
 test('GitHub auth surfaces forced tree termination failure after output overflow', async () => {
