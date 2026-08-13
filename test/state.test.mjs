@@ -92,10 +92,20 @@ test('file identity requires exact bigint dev and ino values', () => {
     ),
     false,
   );
+  // Windows path and handle stats can report different volume identifiers;
+  // the file index is the exact stable object identity across both calls.
+  assert.equal(
+    sameFileIdentity(
+      identityStats({ dev: 11n, ino: 22n }),
+      identityStats({ dev: 99n, ino: 22n }),
+      { platform: 'win32' },
+    ),
+    true,
+  );
   assert.throws(
     () => sameFileIdentity(
       identityStats({ dev: 11n, ino: 22n }),
-      identityStats({ dev: 11n, ino: 23n }),
+      identityStats({ dev: 99n, ino: 23n }),
       { platform: 'win32' },
     ),
     /identity is unsupported on this Windows filesystem/u,

@@ -71,20 +71,75 @@ test('GitHub auth rejects output that exceeds the byte cap', async () => {
   child.stderr = new EventEmitter();
   child.pid = 4321;
   const terminationCalls = [];
+  let releaseTermination;
+  const termination = new Promise((resolve) => {
+    releaseTermination = resolve;
+  });
   const invocation = runGitHubAuthCommand('gh', ['auth', 'status'], {
       environment: {},
       spawnProcess: () => child,
-      terminate: async (_child, options) => {
+      terminate: (_child, options) => {
         terminationCalls.push(options);
+        return termination;
       },
     });
   child.stdout.emit('data', Buffer.alloc((1024 * 1024) - 1, 0x61));
   child.stdout.emit('data', Buffer.from('€'));
+  child.emit('close', 1, 'SIGKILL');
+  let settled = false;
+  void invocation.then(
+    () => { settled = true; },
+    () => { settled = true; },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false, 'overflow must await forced tree termination');
+  // Data arriving after overflow is ignored while the detached tree is
+  // being terminated; it must not accumulate or alter the rejection.
+  child.stdout.emit('data', Buffer.from('post-overflow-secret'));
+  releaseTermination();
   await assert.rejects(
     invocation,
-    (err) => err?.code === 'EOVERFLOW' && /stdout exceeded/u.test(err.message),
+    (err) => {
+      assert.equal(err?.code, 'EOVERFLOW');
+      assert.match(err.message, /stdout exceeded/u);
+      assert.equal(err.stdout, '');
+      assert.equal(err.stderr, '');
+      return true;
+    },
   );
   assert.deepEqual(terminationCalls, [{ platform: process.platform, force: true }]);
+});
+
+test('GitHub auth surfaces forced tree termination failure after output overflow', async () => {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.pid = 4321;
+  const terminationFailure = Object.assign(
+    new Error('taskkill leaked secret bytes'),
+    { code: 'ETERMINATE' },
+  );
+  const invocation = runGitHubAuthCommand('gh', ['auth', 'status'], {
+    environment: {},
+    spawnProcess: () => child,
+    platform: 'win32',
+    terminate: async () => { throw terminationFailure; },
+  });
+  child.stdout.emit('data', Buffer.alloc(1024 * 1024, 0x61));
+  child.stdout.emit('data', Buffer.from('overflow-secret'));
+  child.emit('close', 1, 'SIGKILL');
+
+  await assert.rejects(
+    invocation,
+    (err) => {
+      assert.equal(err?.code, 'ETERMINATE');
+      assert.equal(err?.overflowCode, 'EOVERFLOW');
+      assert.equal(err?.cause, terminationFailure);
+      assert.equal(err.stdout, '');
+      assert.equal(err.stderr, '');
+      return true;
+    },
+  );
 });
 
 test('GitHub auth counts split UTF-8 output by raw bytes at the cap', async () => {
