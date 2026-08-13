@@ -2000,7 +2000,7 @@ test('Windows retention fails closed on a stale PID even when identity appears m
         return rename(...args);
       },
     }),
-    /retention lock is unavailable/u,
+    /owner marker is old but its PID is still live/u,
   );
   assert.equal((await readdir(directory)).includes('.openmergelens-retention.lock'), true);
   assert.equal(renameCalls, 0, 'stale probing must not rename a newer owner pathname');
