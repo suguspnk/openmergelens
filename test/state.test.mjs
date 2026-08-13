@@ -37,6 +37,7 @@ import {
   reviewStateGcAfterKey,
   reviewerKey,
   sameFileIdentity,
+  samePathIdentity,
   saveState,
   serializeState,
   STATE_METADATA_KEY,
@@ -102,6 +103,24 @@ test('file identity requires exact bigint dev and ino values', () => {
       { platform: 'win32' },
     ),
     true,
+  );
+  // Path-to-path checks must retain the volume component. Equal file indexes
+  // from different volumes are not the same object.
+  assert.equal(
+    samePathIdentity(
+      identityStats({ dev: 11n, ino: 22n }),
+      identityStats({ dev: 99n, ino: 22n }),
+      { platform: 'win32' },
+    ),
+    false,
+  );
+  assert.throws(
+    () => sameFileIdentity(
+      identityStats({ dev: 11n, ino: 22n }),
+      identityStats({ dev: 99n, ino: 22n }),
+      { platform: 'win32', requireVolumeMatch: true },
+    ),
+    /identity is unsupported on this Windows filesystem/u,
   );
   assert.throws(
     () => sameFileIdentity(
