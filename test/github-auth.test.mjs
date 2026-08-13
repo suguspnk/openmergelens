@@ -149,6 +149,38 @@ test('GitHub auth surfaces forced tree termination failure after output overflow
   );
 });
 
+test('GitHub auth overflow cancels a delayed timeout and performs one cleanup', async () => {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.pid = 4321;
+  const terminationCalls = [];
+  let releaseTermination;
+  const termination = new Promise((resolve) => {
+    releaseTermination = resolve;
+  });
+  const invocation = runGitHubAuthCommand('gh', ['auth', 'status'], {
+    timeoutMs: 5,
+    hardKillGraceMs: 1,
+    environment: {},
+    spawnProcess: () => child,
+    terminate: (_child, options) => {
+      terminationCalls.push(options);
+      return termination;
+    },
+  });
+  child.stdout.emit('data', Buffer.alloc(1024 * 1024, 0x61));
+  child.stdout.emit('data', Buffer.from('overflow-secret'));
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  releaseTermination();
+
+  await assert.rejects(invocation, (err) => err?.code === 'EOVERFLOW');
+  assert.deepEqual(terminationCalls, [{
+    platform: process.platform,
+    force: true,
+  }]);
+});
+
 test('GitHub auth counts split UTF-8 output by raw bytes at the cap', async () => {
   const child = new EventEmitter();
   child.stdout = new EventEmitter();

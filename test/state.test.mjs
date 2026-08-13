@@ -1445,6 +1445,46 @@ test('Windows state rejects a canonical ancestor substitution even when its targ
   await assert.rejects(stat(stateFile), { code: 'ENOENT' });
 });
 
+test('Windows state walks injected ancestor lstat results on non-Windows', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-reparse-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const directory = path.join(root, 'private');
+  const stateFile = path.join(directory, 'state.json');
+  await mkdir(directory, { mode: 0o700 });
+  const reparseAncestor = path.win32.normalize(path.win32.resolve(root));
+  let walkedAncestor = false;
+
+  const injectedLstat = async (candidate, options) => {
+    if (typeof candidate === 'string' && !candidate.startsWith('/')) {
+      if (path.win32.normalize(candidate) === reparseAncestor) {
+        walkedAncestor = true;
+        return {
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => true,
+        };
+      }
+      return {
+        isDirectory: () => true,
+        isFile: () => false,
+        isSymbolicLink: () => false,
+      };
+    }
+    return lstat(candidate, options);
+  };
+
+  await assert.rejects(
+    saveState(stateFile, {}, {
+      platform: 'win32',
+      realpath: async (parentPath) => parentPath,
+      lstat: injectedLstat,
+    }),
+    /parent directory realpath changed/u,
+  );
+  assert.equal(walkedAncestor, true);
+  await assert.rejects(stat(stateFile), { code: 'ENOENT' });
+});
+
 test('Windows state save rechecks the parent realpath immediately before atomic commit', async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-parent-'));
   t.after(() => rm(root, { recursive: true, force: true }));
