@@ -1396,6 +1396,59 @@ test('parent swap at the final rename boundary cannot report attacker content co
   );
 });
 
+test('Windows state save rejects a parent realpath substitution before creating a replacement', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-parent-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const directory = path.join(root, 'private');
+  const stateFile = path.join(directory, 'state.json');
+  await mkdir(directory, { mode: 0o700 });
+
+  let realpathCalls = 0;
+  await assert.rejects(
+    saveState(stateFile, {}, {
+      platform: 'win32',
+      realpath: async (parentPath) => {
+        realpathCalls += 1;
+        return path.join(root, 'junction-target');
+      },
+    }),
+    /parent directory realpath changed/u,
+  );
+
+  assert.equal(realpathCalls, 1);
+  await assert.rejects(stat(stateFile), { code: 'ENOENT' });
+});
+
+test('Windows state save rechecks the parent realpath immediately before atomic commit', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-parent-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const directory = path.join(root, 'private');
+  const stateFile = path.join(directory, 'state.json');
+  await mkdir(directory, { mode: 0o700 });
+
+  let realpathCalls = 0;
+  let commitCalled = false;
+  await assert.rejects(
+    saveState(stateFile, {}, {
+      platform: 'win32',
+      realpath: async (parentPath) => {
+        realpathCalls += 1;
+        return realpathCalls < 3
+          ? parentPath
+          : path.join(root, 'junction-target');
+      },
+      commitRename: async () => {
+        commitCalled = true;
+      },
+    }),
+    /parent directory realpath changed/u,
+  );
+
+  assert.equal(commitCalled, false);
+  assert.equal(realpathCalls >= 3, true);
+  await assert.rejects(stat(stateFile), { code: 'ENOENT' });
+});
+
 test('saving rejects an unsafe existing parent without tightening it', {
   skip: process.platform === 'win32',
 }, async (t) => {
