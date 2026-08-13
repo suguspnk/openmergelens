@@ -1544,7 +1544,7 @@ test('Windows retention cap uses one parent marker across processes and state fi
   );
 });
 
-test('Windows retention fails closed on an orphan empty lock', async (t) => {
+test('Windows retention recovers an orphan empty lock under the parent guard', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-orphan-lock-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const lockPath = path.join(directory, '.openmergelens-retention.lock');
@@ -1553,21 +1553,18 @@ test('Windows retention fails closed on an orphan empty lock', async (t) => {
   await utimes(lockPath, stale, stale);
 
   let renameCalls = 0;
-  await assert.rejects(
-    saveState(path.join(directory, 'state.json'), {}, {
+  await saveState(path.join(directory, 'state.json'), {}, {
       platform: 'win32',
-      retentionLockRetryLimit: 1,
+      retentionLockRetryLimit: 2,
       retentionLockRetryDelayMs: 0,
       reserveRename: async (...args) => {
         renameCalls += 1;
         return rename(...args);
       },
-    }),
-    /retention lock is unavailable/u,
-  );
+    });
   const names = await readdir(directory);
-  assert.equal(names.includes('.openmergelens-retention.lock'), true);
-  assert.equal(renameCalls, 0, 'stale probing must not rename the lock pathname');
+  assert.equal(names.includes('.openmergelens-retention.lock'), false);
+  assert.equal(renameCalls >= 1, true, 'orphan lock is reclaimed only after identity binding');
 });
 
 test('Windows retention guard survives a crashed owner and requires explicit recovery', async (t) => {
@@ -1838,12 +1835,12 @@ test('Windows retention lock rejects equal-index mixed-volume handle/path bindin
     /identity is unsupported on this Windows filesystem/u,
   );
   const names = await readdir(directory);
-  assert.equal(names.includes('.openmergelens-retention.lock'), false);
+  assert.equal(names.includes('.openmergelens-retention.lock'), true);
   assert.equal(names.includes('.openmergelens-retention.guard'), false);
   assert.equal(
     names.filter((name) => name.startsWith('state.json.tmp-')).length,
-    1,
-    'the rejected lock inode remains as bounded evidence',
+    0,
+    'the rejected lock remains at its guarded pathname',
   );
 });
 
