@@ -1390,6 +1390,108 @@ test('Windows retention cap uses one parent marker across processes and state fi
   );
 });
 
+for (const markerFailure of [
+  {
+    name: 'truncate failure',
+    method: 'truncate',
+    error: /sentinel truncate failure/u,
+  },
+  {
+    name: 'write failure',
+    method: 'write',
+    error: /sentinel write failure/u,
+  },
+  {
+    name: 'sync failure',
+    method: 'sync',
+    error: /sentinel sync failure/u,
+  },
+  {
+    name: 'short write',
+    method: 'shortWrite',
+    error: /sentinel write was short/u,
+  },
+]) {
+  test(`Windows retention marker recovers after a ${markerFailure.name}`, async (t) => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-marker-recovery-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const stateFile = path.join(directory, 'state.json');
+    for (let index = 0; index < MAX_REVIEW_STATE_TEMPORARIES; index += 1) {
+      await writeFile(
+        path.join(
+          directory,
+          `seed-${index}.tmp-1-00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+        ),
+        'retained evidence\n',
+      );
+    }
+
+    let firstCapacityRead = true;
+    const readdirWithRetryWindow = async (...args) => {
+      if (args[0] === directory && firstCapacityRead) {
+        firstCapacityRead = false;
+        return readdir(...args);
+      }
+      if (args[0] === directory) return [];
+      return readdir(...args);
+    };
+    let failureHandlePending = true;
+    const openWithMarkerFailure = async (...args) => {
+      const handle = await open(...args);
+      if (
+        !failureHandlePending ||
+        typeof args[0] !== 'string' ||
+        !args[0].endsWith('.openmergelens-retention.lock')
+      ) {
+        return handle;
+      }
+      failureHandlePending = false;
+      return new Proxy(handle, {
+        get(target, property, receiver) {
+          if (property === markerFailure.method) {
+            if (property === 'shortWrite') return undefined;
+            return async () => {
+              throw new Error(`sentinel ${markerFailure.method} failure`);
+            };
+          }
+          if (property === 'write' && markerFailure.method === 'shortWrite') {
+            return async () => ({ bytesWritten: 0 });
+          }
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+    };
+
+    await assert.rejects(
+      saveState(stateFile, {}, {
+        platform: 'win32',
+        readdir: readdirWithRetryWindow,
+        openFile: openWithMarkerFailure,
+      }),
+      (error) => {
+        assert.match(error.message, /temporary retention limit reached/u);
+        assert.match(error.markerError?.message || '', markerFailure.error);
+        return true;
+      },
+    );
+
+    const markerPath = path.join(directory, '.openmergelens-retention.lock');
+    assert.equal((await readdir(directory)).includes('.openmergelens-retention.lock'), false);
+    assert.equal(
+      (await readdir(directory)).filter((name) => name.includes('.tmp-')).length,
+      MAX_REVIEW_STATE_TEMPORARIES + 1,
+    );
+    const result = await saveState(stateFile, {}, {
+      platform: 'win32',
+      readdir: readdirWithRetryWindow,
+      openFile: openWithMarkerFailure,
+    });
+    assert.equal(result.committed, true);
+    await assert.rejects(lstat(markerPath));
+  });
+}
+
 for (const failure of [
   {
     name: 'readdir failure',

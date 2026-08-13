@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -331,6 +332,44 @@ test('invokeReviewer rejects a stdin failure when the reviewer otherwise exits s
       prompt: 'x'.repeat(800_000),
     }),
     /failed to send prompt.*write (?:EPIPE|EOF)/,
+  );
+});
+
+test('invokeReviewer surfaces a POSIX forced tree termination failure', {
+  timeout: 2_000,
+}, async () => {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdin = new EventEmitter();
+  child.stdin.write = () => true;
+  child.stdin.end = () => {};
+  const terminationFailure = Object.assign(
+    new Error('group and leader termination failed'),
+    { code: 'ETERMINATE' },
+  );
+
+  await assert.rejects(
+    invokeReviewer({
+      reviewerCommand: 'stub-reviewer',
+      prompt: 'prompt',
+      timeoutMs: 10,
+      platform: 'linux',
+      prepare: async () => ({
+        command: 'stub-reviewer',
+        args: [],
+        options: {},
+      }),
+      spawnProcess: () => child,
+      terminate: async (_target, { force }) => {
+        if (force) throw terminationFailure;
+      },
+    }),
+    (err) =>
+      err?.code === 'ETERMINATE' &&
+      err?.terminalCode === 'ETIMEDOUT' &&
+      err?.timeoutCode === 'ETIMEDOUT' &&
+      err?.cause === terminationFailure,
   );
 });
 

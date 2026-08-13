@@ -224,6 +224,7 @@ test('resolveGitHubAuth preserves a sanitized abnormal token-command failure', a
     (err) => {
       assert.equal(err.code, 'EGITHUBAUTHCOMMAND');
       assert.equal(err.failureCode, 'ETERMINATE');
+      assert.equal(err.timeoutCode, 'ETIMEDOUT');
       assert.equal(err.overflowCode, 'EOVERFLOW');
       assert.equal(err.cause?.code, 'ETERMINATE');
       assert.equal(err.cause?.timeoutCode, 'ETIMEDOUT');
@@ -232,6 +233,52 @@ test('resolveGitHubAuth preserves a sanitized abnormal token-command failure', a
       assert.equal('stdout' in err, false);
       assert.equal('stderr' in err, false);
       assert.doesNotMatch(`${err.message}\n${err.cause?.message}`, new RegExp(secret, 'u'));
+      return true;
+    },
+  );
+});
+
+test('resolveGitHubAuth sanitizes a POSIX forced termination failure', {
+  timeout: 2_000,
+}, async () => {
+  const child = new EventEmitter();
+  child.pid = 4321;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  const terminationFailure = Object.assign(
+    new Error('termination detail must not escape'),
+    { code: 'ETERMINATE' },
+  );
+
+  await assert.rejects(
+    resolveGitHubAuth(
+      { hostname: 'github.com', username: 'octocat', repositories: ['owner/repo'] },
+      {
+        timeoutMs: 10,
+        runCommand: (command, args, options) => {
+          const invocation = runGitHubAuthCommand(command, args, {
+            ...options,
+            platform: 'linux',
+            hardKillGraceMs: 1,
+            spawnProcess: () => child,
+            terminate: async (_target, { force }) => {
+              if (force) throw terminationFailure;
+            },
+          });
+          setTimeout(() => child.emit('close', 0, null), 10);
+          return invocation;
+        },
+      },
+    ),
+    (err) => {
+      assert.equal(err.code, 'EGITHUBAUTHCOMMAND');
+      assert.equal(err.failureCode, 'ETERMINATE');
+      assert.equal(err.timeoutCode, 'ETIMEDOUT');
+      assert.equal(err.cause?.code, 'ETERMINATE');
+      assert.equal(err.cause?.timeoutCode, 'ETIMEDOUT');
+      assert.equal('stdout' in err, false);
+      assert.equal('stderr' in err, false);
+      assert.doesNotMatch(`${err.message}\n${err.cause?.message}`, /termination detail/u);
       return true;
     },
   );
@@ -288,6 +335,36 @@ test('GitHub auth timeout force-kills a child that ignores SIGTERM', {
   );
 
   assert.ok(Date.now() - startedAt < 1_000);
+});
+
+test('GitHub auth surfaces a POSIX forced tree termination failure', {
+  timeout: 2_000,
+}, async () => {
+  const child = new EventEmitter();
+  child.pid = 4321;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  const terminationFailure = Object.assign(
+    new Error('group and leader termination failed'),
+    { code: 'ETERMINATE' },
+  );
+
+  await assert.rejects(
+    runGitHubAuthCommand('gh', ['auth', 'status'], {
+      timeoutMs: 10,
+      hardKillGraceMs: 10,
+      environment: {},
+      platform: 'linux',
+      spawnProcess: () => child,
+      terminate: async (_target, { force }) => {
+        if (force) throw terminationFailure;
+      },
+    }),
+    (err) =>
+      err?.code === 'ETERMINATE' &&
+      err?.timeoutCode === 'ETIMEDOUT' &&
+      err?.cause === terminationFailure,
+  );
 });
 
 test('GitHub auth timeout keeps tree kill armed after the leader exits', {
