@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import {
   chmod,
   lstat,
@@ -50,7 +51,44 @@ import {
   MAX_STATE_FILE_BYTES,
 } from '../lib/security-limits.mjs';
 
+const saveStateModuleUrl = new URL('../lib/state.mjs', import.meta.url).href;
+
 const reviewer = { hostname: 'github.com', username: 'OctoCat' };
+
+function runWindowsSaveChild(stateFile) {
+  const script = `
+    import { saveState, prKey } from ${JSON.stringify(saveStateModuleUrl)};
+    const state = {
+      [prKey('owner/repo', 1, { hostname: 'github.com', username: 'child' })]: {
+        lastReviewedSha: 'child-sha',
+        lastReviewedAt: '2026-07-28T00:00:00.000Z',
+      },
+    };
+    try {
+      await saveState(process.argv[1], state, {
+        platform: 'win32',
+        hardenHandle: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 40));
+          throw new Error('child pre-rename failure');
+        },
+      });
+      process.exitCode = 0;
+    } catch (error) {
+      process.stderr.write(JSON.stringify({ message: error.message }));
+      process.exitCode = 1;
+    }
+  `;
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script, stateFile], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.once('error', reject);
+    child.once('close', (code, signal) => resolve({ code, signal, stderr }));
+  });
+}
 
 function identityStats({ dev = 11n, ino = 22n, directory = true } = {}) {
   return {
@@ -1277,6 +1315,78 @@ test('concurrent Windows saves reserve temporary capacity atomically', async (t)
   assert.equal(
     (await readdir(directory)).filter((name) => name.includes('.tmp-')).length,
     MAX_REVIEW_STATE_TEMPORARIES,
+  );
+});
+
+test('Windows retention cap uses one parent marker across processes and state files', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-parent-lock-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+
+  // Seed all but one reservation with generated-looking retained files. The
+  // children race to claim the final slot using different state filenames.
+  // A state-file-scoped lock would let both pass this count check.
+  for (let index = 0; index < MAX_REVIEW_STATE_TEMPORARIES - 1; index += 1) {
+    const suffix = String(index).padStart(12, '0');
+    await writeFile(
+      path.join(
+        directory,
+        `seed-${index}.tmp-1-00000000-0000-4000-8000-${suffix}`,
+      ),
+      'operator evidence\n',
+    );
+  }
+
+  const [first, second] = await Promise.all([
+    runWindowsSaveChild(path.join(directory, 'state-a.json')),
+    runWindowsSaveChild(path.join(directory, 'state-b.json')),
+  ]);
+  const outcomes = [first, second].map(({ code, stderr }) => ({
+    code,
+    message: (() => {
+      try { return JSON.parse(stderr).message; } catch { return stderr; }
+    })(),
+  }));
+  assert.equal(
+    outcomes.filter(({ message }) => /child pre-rename failure/u.test(message)).length,
+    1,
+  );
+  assert.equal(
+    outcomes.filter(({ message }) => /retention limit reached/u.test(message)).length,
+    1,
+  );
+
+  const namesAfterRace = await readdir(directory);
+  assert.equal(
+    namesAfterRace.filter((name) => name.includes('.tmp-')).length,
+    MAX_REVIEW_STATE_TEMPORARIES,
+  );
+  assert.deepEqual(
+    namesAfterRace.filter((name) => name === '.openmergelens-retention.lock'),
+    ['.openmergelens-retention.lock'],
+  );
+  assert.equal(
+    namesAfterRace.filter((name) => name.includes('.blocked-')).length,
+    0,
+  );
+
+  // Repeated attempts, including a different state filename, reuse the same
+  // bounded marker and never append another evidence artifact.
+  await assert.rejects(
+    saveState(path.join(directory, 'state-a.json'), {}, { platform: 'win32' }),
+    /retention limit reached/u,
+  );
+  await assert.rejects(
+    saveState(path.join(directory, 'state-b.json'), {}, { platform: 'win32' }),
+    /retention limit reached/u,
+  );
+  const namesAfterRetries = await readdir(directory);
+  assert.equal(
+    namesAfterRetries.filter((name) => name === '.openmergelens-retention.lock').length,
+    1,
+  );
+  assert.equal(
+    namesAfterRetries.filter((name) => name.includes('.blocked-')).length,
+    0,
   );
 });
 
