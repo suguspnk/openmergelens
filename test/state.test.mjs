@@ -5,6 +5,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   rename,
@@ -116,6 +117,32 @@ test('file identity requires exact bigint dev and ino values', () => {
       identityStats({ dev: 11, ino: 22 }),
       { platform: 'win32' },
     ),
+    /identity is unsupported on this Windows filesystem/u,
+  );
+});
+
+test('Windows file identity round-trips handles and rejects a replacement', {
+  skip: process.platform !== 'win32',
+}, async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-identity-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, 'state.json');
+  const replacementPath = path.join(directory, 'replacement.json');
+  await writeFile(filePath, 'original');
+  await writeFile(replacementPath, 'replacement');
+
+  const handle = await open(filePath, 'r');
+  t.after(() => handle.close().catch(() => {}));
+  const handleStats = await handle.stat({ bigint: true });
+  const pathStats = await lstat(filePath, { bigint: true });
+  assert.equal(
+    sameFileIdentity(handleStats, pathStats, { platform: 'win32' }),
+    true,
+  );
+
+  const replacementStats = await lstat(replacementPath, { bigint: true });
+  assert.throws(
+    () => sameFileIdentity(handleStats, replacementStats, { platform: 'win32' }),
     /identity is unsupported on this Windows filesystem/u,
   );
 });
