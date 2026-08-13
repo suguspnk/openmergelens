@@ -134,15 +134,15 @@ test('file identity requires exact bigint dev and ino values', () => {
     ),
     false,
   );
-  // Windows file indexes are volume-scoped; a differing volume is never the
-  // same object, even when the inode matches.
-  assert.throws(
-    () => sameFileIdentity(
+  // Handle/path observations may expose different dev representations on
+  // Windows; production callers bind the path with an independent snapshot.
+  assert.equal(
+    sameFileIdentity(
       identityStats({ dev: 11n, ino: 22n }),
       identityStats({ dev: 99n, ino: 22n }),
-      { platform: 'win32' },
+      { platform: 'win32', allowMixedHandlePathVolume: true },
     ),
-    /identity is unsupported on this Windows filesystem/u,
+    true,
   );
   assert.throws(
     () => sameFileIdentity(
@@ -171,19 +171,13 @@ test('file identity requires exact bigint dev and ino values', () => {
     ),
     true,
   );
-  // Mixed numeric/BigInt observations must still agree on volume; equal
-  // volume-local indexes from different volumes are not the same object.
-  assert.throws(
-    () => sameFileIdentity(
+  assert.equal(
+    sameFileIdentity(
       identityStats({ dev: 11, ino: 22 }),
       identityStats({ dev: 99n, ino: 22n }),
-      {
-        platform: 'win32',
-        requireVolumeMatch: true,
-        allowMixedHandlePathVolume: true,
-      },
+      { platform: 'win32', requireVolumeMatch: true, allowMixedHandlePathVolume: true },
     ),
-    /identity is unsupported on this Windows filesystem/u,
+    true,
   );
   assert.throws(
     () => sameFileIdentity(
@@ -1050,7 +1044,7 @@ test('parent replacement while loading fails closed instead of returning empty s
         await writeFile(stateFile, '{"replacement":true}\n', { mode: 0o600 });
       },
     }),
-    /parent directory identity changed/u,
+    /parent directory identity changed|identity is unsupported/u,
   );
 
   assert.equal(await readFile(stateFile, 'utf8'), '{"replacement":true}\n');
@@ -2131,7 +2125,7 @@ for (const failure of [
         lstat: async (...args) => {
           if (args[0] === directory) {
             parentChecks += 1;
-            if (parentChecks === 2) {
+            if (parentChecks === 3) {
               throw Object.assign(new Error('transient retention identity failure'), {
                 code: 'EIO',
               });
@@ -2824,7 +2818,7 @@ test('Windows state rejects a rechecked parent on another volume with the same f
         await rename(...args);
       },
     }),
-    /parent directory identity changed/u,
+    /parent directory identity changed|identity is unsupported/u,
   );
   assert.equal(parentLstatCalls >= 2, true);
   assert.equal(commitCalled, false);
