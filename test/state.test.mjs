@@ -35,6 +35,7 @@ import {
   reviewStateEntryCount,
   reviewStateGcAfterKey,
   reviewerKey,
+  sameFileIdentity,
   saveState,
   serializeState,
   STATE_METADATA_KEY,
@@ -47,6 +48,67 @@ import {
 } from '../lib/security-limits.mjs';
 
 const reviewer = { hostname: 'github.com', username: 'OctoCat' };
+
+function identityStats({ dev = 11n, ino = 22n, directory = true } = {}) {
+  return {
+    dev,
+    ino,
+    mode: 0o700n,
+    birthtimeMs: 1,
+    ctimeMs: 1,
+    isDirectory: () => directory,
+  };
+}
+
+test('file identity requires exact bigint dev and ino values', () => {
+  assert.equal(
+    sameFileIdentity(identityStats(), identityStats(), { platform: 'linux' }),
+    true,
+  );
+  // Numeric Stats values are rejected even when their values happen to fit in
+  // a JavaScript number. Identity checks must use the bigint Stats contract.
+  assert.equal(
+    sameFileIdentity(
+      identityStats({ dev: 11, ino: 22 }),
+      identityStats({ dev: 11, ino: 22 }),
+      { platform: 'linux' },
+    ),
+    false,
+  );
+  // Mutable metadata must not substitute for a mismatched kernel identity.
+  assert.equal(
+    sameFileIdentity(
+      identityStats({ dev: 11n, ino: 22n }),
+      identityStats({ dev: 11n, ino: 23n }),
+      { platform: 'linux' },
+    ),
+    false,
+  );
+  assert.equal(
+    sameFileIdentity(
+      identityStats({ dev: 0n, ino: 22n }),
+      identityStats({ dev: 0n, ino: 22n }),
+      { platform: 'linux' },
+    ),
+    false,
+  );
+  assert.throws(
+    () => sameFileIdentity(
+      identityStats({ dev: 11n, ino: 22n }),
+      identityStats({ dev: 11n, ino: 23n }),
+      { platform: 'win32' },
+    ),
+    /identity is unsupported on this Windows filesystem/u,
+  );
+  assert.throws(
+    () => sameFileIdentity(
+      identityStats({ dev: 11, ino: 22 }),
+      identityStats({ dev: 11, ino: 22 }),
+      { platform: 'win32' },
+    ),
+    /identity is unsupported on this Windows filesystem/u,
+  );
+});
 
 test('review state keys are scoped to the GitHub reviewer', () => {
   assert.equal(reviewerKey(reviewer), 'github.com@octocat');
