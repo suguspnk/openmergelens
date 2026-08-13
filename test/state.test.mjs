@@ -95,7 +95,9 @@ test('file identity requires exact bigint dev and ino values', () => {
     false,
   );
   // Windows path and handle stats can report different volume identifiers;
-  // the file index is the exact stable object identity across both calls.
+  // the exact bigint file index is the stable object identity across both
+  // calls. Numeric Stats values validate safe volume/file values; path-to-path
+  // checks use the complete safe tuple.
   assert.equal(
     sameFileIdentity(
       identityStats({ dev: 11n, ino: 22n }),
@@ -104,6 +106,71 @@ test('file identity requires exact bigint dev and ino values', () => {
     ),
     true,
   );
+  assert.equal(
+    sameFileIdentity(
+      identityStats({ dev: 11, ino: 22 }),
+      identityStats({ dev: 99, ino: 22 }),
+      { platform: 'win32' },
+    ),
+    true,
+  );
+  assert.throws(
+    () => sameFileIdentity(
+      identityStats({ dev: 11, ino: 22 }),
+      identityStats({ dev: 99, ino: 22 }),
+      { platform: 'win32', requireVolumeMatch: true },
+    ),
+    /identity is unsupported on this Windows filesystem/u,
+  );
+  assert.equal(
+    sameFileIdentity(
+      identityStats({ dev: 11, ino: 22 }),
+      identityStats({ dev: 11, ino: 22 }),
+      { platform: 'win32' },
+    ),
+    true,
+  );
+  assert.equal(
+    samePathIdentity(
+      identityStats({ dev: 11, ino: 22 }),
+      identityStats({ dev: 11, ino: 22 }),
+      { platform: 'win32' },
+    ),
+    true,
+  );
+  assert.equal(
+    samePathIdentity(
+      identityStats({ dev: 11, ino: 22 }),
+      identityStats({ dev: 99, ino: 22 }),
+      { platform: 'win32' },
+    ),
+    false,
+  );
+  for (const invalid of [
+    { dev: 0, ino: 22 },
+    { dev: 11, ino: 0 },
+    { dev: Number.MAX_SAFE_INTEGER + 1, ino: 22 },
+    { dev: 11, ino: Number.MAX_SAFE_INTEGER + 1 },
+    { dev: Number.POSITIVE_INFINITY, ino: 22 },
+    { dev: 11, ino: 1.5 },
+  ]) {
+    assert.throws(
+      () => sameFileIdentity(
+        identityStats(invalid),
+        identityStats(invalid),
+        { platform: 'win32' },
+      ),
+      /identity is unsupported on this Windows filesystem/u,
+    );
+    assert.throws(
+      () => samePathIdentity(
+        identityStats(invalid),
+        identityStats(invalid),
+        { platform: 'win32' },
+      ),
+      /identity is unsupported on this Windows filesystem/u,
+    );
+  }
   // Path-to-path checks must retain the volume component. Equal file indexes
   // from different volumes are not the same object.
   assert.equal(
@@ -126,14 +193,6 @@ test('file identity requires exact bigint dev and ino values', () => {
     () => sameFileIdentity(
       identityStats({ dev: 11n, ino: 22n }),
       identityStats({ dev: 99n, ino: 23n }),
-      { platform: 'win32' },
-    ),
-    /identity is unsupported on this Windows filesystem/u,
-  );
-  assert.throws(
-    () => sameFileIdentity(
-      identityStats({ dev: 11, ino: 22 }),
-      identityStats({ dev: 11, ino: 22 }),
       { platform: 'win32' },
     ),
     /identity is unsupported on this Windows filesystem/u,
@@ -1528,6 +1587,14 @@ test('Windows state rejects a rechecked parent on another volume with the same f
   await mkdir(directory, { mode: 0o700 });
 
   let parentLstatCalls = 0;
+  let commitCalled = false;
+  // On real Windows the reparse-ancestor walk lstat's the parent once during
+  // each verification, so the direct identity recheck is the fourth parent
+  // lstat. POSIX-hosted simulations have no walk and recheck on the second.
+  const identityRecheckCall = process.platform === 'win32' &&
+    path.win32.isAbsolute(directory)
+    ? 4
+    : 2;
   const injectedLstat = async (candidate, options) => {
     // The simulated Windows ancestor walk asks lstat() with Win32-shaped
     // paths even though this regression runs on a POSIX host.
@@ -1541,7 +1608,7 @@ test('Windows state rejects a rechecked parent on another volume with the same f
     const stats = await lstat(candidate, options);
     if (candidate !== directory) return stats;
     parentLstatCalls += 1;
-    if (parentLstatCalls !== 2) return stats;
+    if (parentLstatCalls !== identityRecheckCall) return stats;
     // Simulate a hosted Windows path/handle report where the file index is
     // equal but the path resolves on another volume. The handle-side `ino`
     // comparison remains valid; path-side volume binding must reject this.
@@ -1549,7 +1616,9 @@ test('Windows state rejects a rechecked parent on another volume with the same f
       Object.create(Object.getPrototypeOf(stats)),
       stats,
     );
-    replacement.dev = stats.dev + 1n;
+    replacement.dev = typeof stats.dev === 'bigint'
+      ? stats.dev + 1n
+      : stats.dev + 1;
     return replacement;
   };
 
@@ -1558,13 +1627,15 @@ test('Windows state rejects a rechecked parent on another volume with the same f
       platform: 'win32',
       realpath: async (parentPath) => parentPath,
       lstat: injectedLstat,
-      commitRename: async () => {
-        throw new Error('commit must not run');
+      commitRename: async (...args) => {
+        commitCalled = true;
+        await rename(...args);
       },
     }),
     /parent directory identity changed/u,
   );
   assert.equal(parentLstatCalls >= 2, true);
+  assert.equal(commitCalled, false);
   await assert.rejects(stat(stateFile), { code: 'ENOENT' });
 });
 
