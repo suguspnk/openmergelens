@@ -87,6 +87,31 @@ test('GitHub auth rejects output that exceeds the byte cap', async () => {
   assert.deepEqual(terminationCalls, [{ platform: process.platform, force: true }]);
 });
 
+test('GitHub auth counts split UTF-8 output by raw bytes at the cap', async () => {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.pid = 4321;
+  const invocation = runGitHubAuthCommand('gh', ['auth', 'status'], {
+    environment: {},
+    spawnProcess: () => child,
+    terminate: async () => {},
+  });
+
+  // The three-byte sequence is deliberately split across data events. The
+  // response is exactly at the byte cap and must not be rejected because a
+  // per-chunk decoder would turn the partial sequence into replacement text.
+  child.stdout.emit('data', Buffer.alloc((1024 * 1024) - 3, 0x61));
+  child.stdout.emit('data', Buffer.from([0xe2]));
+  child.stdout.emit('data', Buffer.from([0x82]));
+  child.stdout.emit('data', Buffer.from([0xac]));
+  child.emit('close', 0, null);
+
+  const result = await invocation;
+  assert.equal(Buffer.byteLength(result.stdout, 'utf8'), 1024 * 1024);
+  assert.equal(result.stdout.endsWith('€'), true);
+});
+
 test('resolveGitHubAuth preserves a sanitized abnormal token-command failure', async () => {
   const secret = 'SENSITIVE_AUTH_BYTES_MUST_NOT_ESCAPE';
   const terminationFailure = Object.assign(new Error(`cleanup failed: ${secret}`), {
