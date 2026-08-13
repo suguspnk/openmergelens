@@ -65,6 +65,28 @@ test('listAuthenticatedAccounts does not infer a completed exit from a numeric e
   );
 });
 
+test('GitHub auth rejects output that exceeds the byte cap', async () => {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.pid = 4321;
+  const terminationCalls = [];
+  const invocation = runGitHubAuthCommand('gh', ['auth', 'status'], {
+      environment: {},
+      spawnProcess: () => child,
+      terminate: async (_child, options) => {
+        terminationCalls.push(options);
+      },
+    });
+  child.stdout.emit('data', Buffer.alloc((1024 * 1024) - 1, 0x61));
+  child.stdout.emit('data', Buffer.from('€'));
+  await assert.rejects(
+    invocation,
+    (err) => err?.code === 'EOVERFLOW' && /stdout exceeded/u.test(err.message),
+  );
+  assert.deepEqual(terminationCalls, [{ platform: process.platform, force: true }]);
+});
+
 test('resolveGitHubAuth preserves a sanitized abnormal token-command failure', async () => {
   const secret = 'SENSITIVE_AUTH_BYTES_MUST_NOT_ESCAPE';
   const terminationFailure = Object.assign(new Error(`cleanup failed: ${secret}`), {
