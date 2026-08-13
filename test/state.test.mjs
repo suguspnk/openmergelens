@@ -1391,7 +1391,7 @@ test('Windows retention cap uses one parent marker across processes and state fi
   );
 });
 
-test('Windows retention recovers an orphan empty lock after an owner crash', async (t) => {
+test('Windows retention fails closed on an orphan empty lock', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-orphan-lock-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const lockPath = path.join(directory, '.openmergelens-retention.lock');
@@ -1399,16 +1399,25 @@ test('Windows retention recovers an orphan empty lock after an owner crash', asy
   const stale = new Date(Date.now() - 60_000);
   await utimes(lockPath, stale, stale);
 
-  const result = await saveState(path.join(directory, 'state.json'), {}, {
-    platform: 'win32',
-  });
-  assert.equal(result.committed, true);
+  let renameCalls = 0;
+  await assert.rejects(
+    saveState(path.join(directory, 'state.json'), {}, {
+      platform: 'win32',
+      retentionLockRetryLimit: 1,
+      retentionLockRetryDelayMs: 0,
+      reserveRename: async (...args) => {
+        renameCalls += 1;
+        return rename(...args);
+      },
+    }),
+    /retention lock is unavailable/u,
+  );
   const names = await readdir(directory);
-  assert.equal(names.includes('.openmergelens-retention.lock'), false);
-  assert.equal(names.some((name) => /\.tmp-\d+-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(name)), true);
+  assert.equal(names.includes('.openmergelens-retention.lock'), true);
+  assert.equal(renameCalls, 0, 'stale probing must not rename the lock pathname');
 });
 
-test('Windows retention relocates a claimed marker when owner payload acquisition fails', async (t) => {
+test('Windows retention keeps a claimed marker when owner payload acquisition fails', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-owner-failure-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const stateFile = path.join(directory, 'state.json');
@@ -1432,15 +1441,15 @@ test('Windows retention relocates a claimed marker when owner payload acquisitio
     /owner payload open failure/u,
   );
   const names = await readdir(directory);
-  assert.equal(names.includes('.openmergelens-retention.lock'), false);
+  assert.equal(names.includes('.openmergelens-retention.lock'), true);
   assert.equal(
     names.some((name) => name.startsWith('state.json.tmp-')),
-    true,
-    'the claimed inode is retained as evidence instead of leaking the lock pathname',
+    false,
+    'the claimed inode stays at the lock pathname because descriptor-relative cleanup is unavailable',
   );
 });
 
-test('Windows retention reclaims a stale PID only after process-start identity mismatch', async (t) => {
+test('Windows retention fails closed on a stale PID even when identity appears mismatched', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-pid-reuse-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const stateFile = path.join(directory, 'state.json');
@@ -1455,12 +1464,21 @@ test('Windows retention reclaims a stale PID only after process-start identity m
   const staleDate = new Date(staleAt);
   await utimes(lockPath, staleDate, staleDate);
 
-  const result = await saveState(stateFile, {}, {
-    platform: 'win32',
-    getProcessStartIdentity: async () => 'new-process-start',
-  });
-  assert.equal(result.committed, true);
-  assert.equal((await readdir(directory)).includes('.openmergelens-retention.lock'), false);
+  let renameCalls = 0;
+  await assert.rejects(
+    saveState(stateFile, {}, {
+      platform: 'win32',
+      retentionLockRetryLimit: 1,
+      retentionLockRetryDelayMs: 0,
+      reserveRename: async (...args) => {
+        renameCalls += 1;
+        return rename(...args);
+      },
+    }),
+    /retention lock is unavailable/u,
+  );
+  assert.equal((await readdir(directory)).includes('.openmergelens-retention.lock'), true);
+  assert.equal(renameCalls, 0, 'stale probing must not rename a newer owner pathname');
 });
 
 for (const markerFailure of [

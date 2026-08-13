@@ -401,6 +401,27 @@ test('terminateProcessTree rejects a false Windows graceful signal', async () =>
   );
 });
 
+test('terminateProcessTree accepts a false Windows graceful signal after child exit', async () => {
+  const child = {
+    pid: 4321,
+    exitCode: null,
+    signalCode: null,
+    kill() {
+      // Model the timeout/exit race: the child exits just before Node reports
+      // that the graceful signal could not be delivered.
+      this.exitCode = 0;
+      return false;
+    },
+  };
+
+  await assert.doesNotReject(
+    terminateProcessTree(child, {
+      platform: 'win32',
+      force: false,
+    }),
+  );
+});
+
 for (const failure of [
   {
     name: 'an asynchronous taskkill error',
