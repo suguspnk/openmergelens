@@ -1614,6 +1614,56 @@ test('Windows retention guard contenders retry while owner marker initialization
   assert.equal((await readdir(directory)).includes('.openmergelens-retention.guard'), false);
 });
 
+test('Windows retention guard treats a live owner observed after initialization as ordinary contention', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-guard-live-after-init-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const guardPath = path.join(directory, '.openmergelens-retention.guard');
+  await writeFile(guardPath, '');
+  let transitioned = false;
+  const liveMarker = JSON.stringify({
+    version: 1,
+    pid: process.pid,
+    createdAt: Date.now(),
+  }) + '\n';
+  const openWithTransition = async (...args) => {
+    const opened = await open(...args);
+    if (args[0] !== guardPath || transitioned) return opened;
+    return new Proxy(opened, {
+      get(target, property, receiver) {
+        if (property === 'read') {
+          return async (...readArgs) => {
+            const result = await target.read(...readArgs);
+            if (!transitioned && result.bytesRead === 0) {
+              transitioned = true;
+              await writeFile(guardPath, liveMarker);
+            }
+            return result;
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+  };
+  const contender = saveState(path.join(directory, 'contender-state.json'), {}, {
+    platform: 'win32',
+    openFile: openWithTransition,
+    retentionLockRetryLimit: 3,
+    retentionLockRetryDelayMs: 0,
+  });
+
+  await assert.rejects(
+    contender,
+    (error) => {
+      assert.equal(error.code, undefined);
+      assert.match(error.message, /temporary retention guard is unavailable/u);
+      assert.doesNotMatch(error.message, /ERETENTIONGUARDCRASH|remove the guard file/u);
+      return true;
+    },
+  );
+  assert.match(await readFile(guardPath, 'utf8'), /"pid":/u);
+});
+
 for (const marker of [
   { name: 'empty', contents: '' },
   { name: 'partial', contents: '{"version":1,"pid":' },
