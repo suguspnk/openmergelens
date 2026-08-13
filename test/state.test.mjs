@@ -173,6 +173,18 @@ test('file identity requires exact bigint dev and ino values', () => {
     ),
     true,
   );
+  // A hosted Windows descriptor can report a numeric volume while its
+  // pathname observation reports a bigint volume (or vice versa). The file
+  // index still binds those handle/path observations even when the dev values
+  // differ; pathname-to-pathname checks below retain the volume requirement.
+  assert.equal(
+    sameFileIdentity(
+      identityStats({ dev: 11, ino: 22 }),
+      identityStats({ dev: 99n, ino: 22n }),
+      { platform: 'win32', requireVolumeMatch: true },
+    ),
+    true,
+  );
   assert.throws(
     () => sameFileIdentity(
       identityStats({ dev: 11, ino: 22 }),
@@ -327,6 +339,112 @@ test('Windows file identity round-trips handles and rejects a replacement', {
   assert.throws(
     () => sameFileIdentity(handleStats, replacementStats, { platform: 'win32' }),
     /identity is unsupported on this Windows filesystem/u,
+  );
+});
+
+test('Windows simulated save/load accepts mixed handle and pathname stat types', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-mixed-stats-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const state = {
+    [prKey('owner/repo', 1, reviewer)]: {
+      lastReviewedSha: 'mixed-stats-sha',
+      lastReviewedAt: '2026-08-12T00:00:00.000Z',
+    },
+  };
+
+  // Model a Windows hosted runner whose descriptor stats use bigint fields
+  // while lstat() returns safe numeric fields. Win32-shaped ancestor paths are
+  // synthetic because this regression runs on a POSIX host.
+  const mixedLstat = async (candidate, options) => {
+    if (typeof candidate === 'string' && candidate.startsWith('\\')) {
+      return {
+        isDirectory: () => true,
+        isFile: () => false,
+        isSymbolicLink: () => false,
+      };
+    }
+    const stats = await lstat(candidate, options);
+    const mixed = Object.assign(
+      Object.create(Object.getPrototypeOf(stats)),
+      stats,
+    );
+    mixed.dev = Number(stats.dev);
+    mixed.ino = Number(stats.ino);
+    return mixed;
+  };
+  const options = {
+    platform: 'win32',
+    realpath: async (parentPath) => parentPath,
+    lstat: mixedLstat,
+  };
+
+  await saveState(stateFile, state, options);
+  assert.deepEqual(
+    await loadState(stateFile, { ...options, hardenPermissions: false }),
+    state,
+  );
+});
+
+test('Windows retention marker truncation leaves valid JSON and failed truncation retains the prior state', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-marker-truncate-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const initialState = {
+    [prKey('owner/repo', 1, reviewer)]: {
+      lastReviewedSha: 'old-sha',
+      lastReviewedAt: '2026-08-12T00:00:00.000Z',
+    },
+  };
+  const replacement = {
+    [prKey('owner/repo', 1, reviewer)]: {
+      lastReviewedSha: 'new-sha',
+      lastReviewedAt: '2026-08-12T01:00:00.000Z',
+    },
+  };
+
+  await saveState(stateFile, initialState, { platform: 'win32' });
+  assert.deepEqual(
+    await loadState(stateFile, { platform: 'win32', hardenPermissions: false }),
+    initialState,
+  );
+
+  const lockPath = path.join(directory, '.openmergelens-retention.lock');
+  let failTruncate = true;
+  const openWithTruncateFailure = async (...args) => {
+    const handle = await open(...args);
+    if (args[0] !== lockPath || !failTruncate) return handle;
+    failTruncate = false;
+    return new Proxy(handle, {
+      get(target, property, receiver) {
+        if (property === 'truncate') {
+          return async () => { throw new Error('sentinel truncate failure'); };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+  };
+
+  await assert.rejects(
+    saveState(stateFile, replacement, {
+      platform: 'win32',
+      openFile: openWithTruncateFailure,
+    }),
+    /sentinel truncate failure/u,
+  );
+  assert.deepEqual(
+    await loadState(stateFile, { platform: 'win32', hardenPermissions: false }),
+    initialState,
+  );
+  const retained = (await readdir(directory)).filter((name) => name.includes('.tmp-'));
+  assert.equal(retained.length, 1, 'the failed reservation is retained as one bounded artifact');
+  assert.ok(retained.length <= MAX_REVIEW_STATE_TEMPORARIES);
+
+  await saveState(stateFile, replacement, { platform: 'win32' });
+  assert.deepEqual(
+    await loadState(stateFile, { platform: 'win32', hardenPermissions: false }),
+    replacement,
   );
 });
 
