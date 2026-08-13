@@ -181,9 +181,25 @@ test('file identity requires exact bigint dev and ino values', () => {
     sameFileIdentity(
       identityStats({ dev: 11, ino: 22 }),
       identityStats({ dev: 99n, ino: 22n }),
-      { platform: 'win32', requireVolumeMatch: true },
+      {
+        platform: 'win32',
+        requireVolumeMatch: true,
+        allowMixedHandlePathVolume: true,
+      },
     ),
     true,
+  );
+  assert.throws(
+    () => sameFileIdentity(
+      identityStats({ dev: 11, ino: 22 }),
+      identityStats({ dev: 99n, ino: 22n }),
+      {
+        platform: 'win32',
+        requireVolumeMatch: true,
+        allowMixedHandlePathVolume: false,
+      },
+    ),
+    /identity is unsupported on this Windows filesystem/u,
   );
   assert.throws(
     () => sameFileIdentity(
@@ -1730,6 +1746,106 @@ for (const guardFailure of [
     assert.equal((await readdir(directory)).includes('state.json'), true);
   });
 }
+
+test('Windows retention guard rejects equal-index mixed-volume handle/path bindings', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-guard-volume-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const guardPath = path.join(directory, '.openmergelens-retention.guard');
+  let guardOpenCount = 0;
+  const openWithMixedVolume = async (...args) => {
+    const handle = await open(...args);
+    if (args[0] !== guardPath || guardOpenCount++ !== 0) return handle;
+    return new Proxy(handle, {
+      get(target, property, receiver) {
+        if (property === 'stat') {
+          return async (...statArgs) => {
+            const stats = await target.stat(...statArgs);
+            const mixed = Object.assign(
+              Object.create(Object.getPrototypeOf(stats)),
+              stats,
+            );
+            mixed.dev = typeof stats.dev === 'bigint'
+              ? Number(stats.dev) + 1
+              : BigInt(stats.dev) + 1n;
+            return mixed;
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+  };
+
+  await assert.rejects(
+    saveState(stateFile, {}, {
+      platform: 'win32',
+      openFile: openWithMixedVolume,
+      retentionLockRetryLimit: 1,
+      retentionLockRetryDelayMs: 0,
+    }),
+    /identity is unsupported on this Windows filesystem/u,
+  );
+  const names = await readdir(directory);
+  // The strict identity failure deliberately prevents pathname reclaim of the
+  // guard inode; it remains for explicit operator recovery rather than being
+  // replaced through an unverified path.
+  assert.equal(names.includes('.openmergelens-retention.guard'), true);
+  assert.equal(
+    names.filter((name) => name.startsWith('state.json.tmp-')).length,
+    0,
+    'the unreclaimable guard remains at its original pathname',
+  );
+});
+
+test('Windows retention lock rejects equal-index mixed-volume handle/path bindings', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-lock-volume-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const lockPath = path.join(directory, '.openmergelens-retention.lock');
+  let lockOpenCount = 0;
+  const openWithMixedVolume = async (...args) => {
+    const handle = await open(...args);
+    if (args[0] !== lockPath || lockOpenCount++ !== 0) return handle;
+    return new Proxy(handle, {
+      get(target, property, receiver) {
+        if (property === 'stat') {
+          return async (...statArgs) => {
+            const stats = await target.stat(...statArgs);
+            const mixed = Object.assign(
+              Object.create(Object.getPrototypeOf(stats)),
+              stats,
+            );
+            mixed.dev = typeof stats.dev === 'bigint'
+              ? Number(stats.dev) + 1
+              : BigInt(stats.dev) + 1n;
+            return mixed;
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+  };
+
+  await assert.rejects(
+    saveState(stateFile, {}, {
+      platform: 'win32',
+      openFile: openWithMixedVolume,
+      retentionLockRetryLimit: 1,
+      retentionLockRetryDelayMs: 0,
+    }),
+    /identity is unsupported on this Windows filesystem/u,
+  );
+  const names = await readdir(directory);
+  assert.equal(names.includes('.openmergelens-retention.lock'), false);
+  assert.equal(names.includes('.openmergelens-retention.guard'), false);
+  assert.equal(
+    names.filter((name) => name.startsWith('state.json.tmp-')).length,
+    1,
+    'the rejected lock inode remains as bounded evidence',
+  );
+});
 
 test('Windows retention guard contenders retry while owner marker initialization is paused', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-guard-init-pause-'));
