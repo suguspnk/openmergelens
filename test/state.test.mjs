@@ -1086,12 +1086,20 @@ test('state commit flushes bytes then rename then parent directory', async (t) =
     },
     flushParentHandle: async (handle) => {
       events.push('parent-sync');
-      await handle.sync();
+      await flushStateDirectoryHandle(handle, {
+        platform: process.platform,
+      });
     },
   });
 
   assert.deepEqual(events, ['temp-sync', 'rename', 'parent-sync']);
-  assert.deepEqual(result, { committed: true, directorySynced: true });
+  if (process.platform === 'win32') {
+    assert.equal(result.committed, true);
+    assert.equal(result.directorySynced, false);
+    assert.match(result.postCommitError.message, /unsupported on this Windows filesystem/u);
+  } else {
+    assert.deepEqual(result, { committed: true, directorySynced: true });
+  }
   assert.deepEqual(await loadState(stateFile), {});
 });
 

@@ -1,23 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
   ensureLearningsFile,
   learningsPathFor,
   readLearnings,
 } from '../lib/learnings.mjs';
+import { createTestHome, setProcessTestHome } from './test-home.mjs';
 
 test('learnings are isolated by host, account, and repository', async (t) => {
-  const home = await mkdtemp(path.join(tmpdir(), 'openmergelens-learnings-'));
-  const original = process.env.OPENMERGELENS_HOME;
-  process.env.OPENMERGELENS_HOME = home;
-  t.after(async () => {
-    if (original === undefined) delete process.env.OPENMERGELENS_HOME;
-    else process.env.OPENMERGELENS_HOME = original;
-    await rm(home, { recursive: true, force: true });
-  });
+  const home = await createTestHome(t, 'openmergelens-learnings-');
+  setProcessTestHome(t, home);
 
   const work = { hostname: 'github.com', username: 'Work-User' };
   const personal = { hostname: 'github.com', username: 'personal' };
@@ -41,14 +35,8 @@ test('learnings are isolated by host, account, and repository', async (t) => {
 test('read-only learnings reads do not create or harden local files', {
   skip: process.platform === 'win32',
 }, async (t) => {
-  const home = await mkdtemp(path.join(tmpdir(), 'openmergelens-learnings-readonly-'));
-  const original = process.env.OPENMERGELENS_HOME;
-  process.env.OPENMERGELENS_HOME = home;
-  t.after(async () => {
-    if (original === undefined) delete process.env.OPENMERGELENS_HOME;
-    else process.env.OPENMERGELENS_HOME = original;
-    await rm(home, { recursive: true, force: true });
-  });
+  const home = await createTestHome(t, 'openmergelens-learnings-readonly-');
+  setProcessTestHome(t, home);
 
   const account = { hostname: 'github.com', username: 'work' };
   const missingPath = learningsPathFor(account, 'owner/missing');

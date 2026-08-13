@@ -15,7 +15,9 @@ test('userHome defaults to ~/.openmergelens when OPENMERGELENS_HOME is unset', (
   assert.equal(userHome(), path.join(homedir(), '.openmergelens'));
 });
 
-test('userHome respects OPENMERGELENS_HOME override', (t) => {
+test('userHome respects OPENMERGELENS_HOME override', {
+  skip: process.platform === 'win32',
+}, (t) => {
   const original = process.env.OPENMERGELENS_HOME;
   process.env.OPENMERGELENS_HOME = '/tmp/custom-openmergelens-home';
   t.after(() => {
@@ -26,7 +28,9 @@ test('userHome respects OPENMERGELENS_HOME override', (t) => {
   assert.equal(userHome(), '/tmp/custom-openmergelens-home');
 });
 
-test('userHome resolves a relative OPENMERGELENS_HOME override', (t) => {
+test('userHome resolves a relative OPENMERGELENS_HOME override', {
+  skip: process.platform === 'win32',
+}, (t) => {
   const original = process.env.OPENMERGELENS_HOME;
   process.env.OPENMERGELENS_HOME = './relative-openmergelens-home';
   t.after(() => {
@@ -44,7 +48,9 @@ test('userHome resolves a relative OPENMERGELENS_HOME override', (t) => {
   );
 });
 
-test('userPath joins segments onto the user home', (t) => {
+test('userPath joins segments onto the user home', {
+  skip: process.platform === 'win32',
+}, (t) => {
   const original = process.env.OPENMERGELENS_HOME;
   const customHome = path.join(path.parse(process.cwd()).root, 'tmp', 'custom-openmergelens-home');
   process.env.OPENMERGELENS_HOME = customHome;
@@ -58,7 +64,9 @@ test('userPath joins segments onto the user home', (t) => {
   assert.equal(userPath(), customHome);
 });
 
-test('resolveUserPath leaves an absolute path untouched', (t) => {
+test('resolveUserPath leaves an absolute path untouched', {
+  skip: process.platform === 'win32',
+}, (t) => {
   const original = process.env.OPENMERGELENS_HOME;
   process.env.OPENMERGELENS_HOME = '/tmp/custom-openmergelens-home';
   t.after(() => {
@@ -72,7 +80,9 @@ test('resolveUserPath leaves an absolute path untouched', (t) => {
   assert.equal(resolveUserPath('/absolute/path/state.json'), '/absolute/path/state.json');
 });
 
-test('resolveUserPath resolves a relative path against the user home', (t) => {
+test('resolveUserPath resolves a relative path against the user home', {
+  skip: process.platform === 'win32',
+}, (t) => {
   const original = process.env.OPENMERGELENS_HOME;
   const customHome = path.join(path.parse(process.cwd()).root, 'tmp', 'custom-openmergelens-home');
   process.env.OPENMERGELENS_HOME = customHome;

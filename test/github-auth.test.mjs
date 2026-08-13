@@ -131,9 +131,13 @@ test('GitHub auth timeout force-kills a child that ignores SIGTERM', {
         'process.on("SIGTERM",()=>{});setInterval(()=>{},1000)',
       ],
       {
-        timeoutMs: 30,
+        // A 30 ms budget races Node 24 startup on hosted macOS ARM and can
+        // reject before the forced tree kill has attached. Keep the fixture
+        // short while giving the child enough time to reach its SIGTERM
+        // handler deterministically.
+        timeoutMs: 100,
         environment: process.env,
-        hardKillGraceMs: 30,
+        hardKillGraceMs: 100,
       },
     ),
     (err) => err?.code === 'ETIMEDOUT' && err?.signal === 'SIGKILL',

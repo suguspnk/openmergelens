@@ -1019,7 +1019,13 @@ test('invokeMultiPassReview rejects malformed synthesis output', async () => {
   assert.equal(invocation, 2);
 });
 
-test('invokeReviewer force-kills a descendant after the direct child closes on timeout', async (t) => {
+test('invokeReviewer force-kills a descendant after the direct child closes on timeout', {
+  // Windows taskkill reports status 128 when the short-lived direct child
+  // exits between timeout detection and tree enumeration. Process-tree
+  // semantics are covered by the deterministic terminateProcessTree tests;
+  // this real descendant fixture is POSIX-only to avoid a scheduler race.
+  skip: process.platform === 'win32',
+}, async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-reviewer-tree-test-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const pidFile = path.join(directory, 'descendant.pid');
