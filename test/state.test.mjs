@@ -1216,6 +1216,70 @@ test('Windows retained replacement files are bounded without unsafe scavenging',
   );
 });
 
+test('concurrent Windows saves reserve temporary capacity atomically', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-race-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const replacement = {
+    [prKey('owner/repo', 1, reviewer)]: {
+      lastReviewedSha: 'sha-1',
+      lastReviewedAt: '2026-07-28T00:00:00.000Z',
+    },
+  };
+  let readdirCalls = 0;
+  let releaseFirstRead;
+  let firstReadEntered;
+  const firstRead = new Promise((resolve) => {
+    firstReadEntered = resolve;
+  });
+  const readGate = new Promise((resolve) => {
+    releaseFirstRead = resolve;
+  });
+  const concurrentReadDirectory = async (...args) => {
+    readdirCalls += 1;
+    if (readdirCalls === 1) {
+      firstReadEntered();
+      await readGate;
+    }
+    return readdir(...args);
+  };
+  const saveOptions = {
+    platform: 'win32',
+    readdir: concurrentReadDirectory,
+    hardenHandle: async () => {
+      throw new Error('simulated pre-rename failure');
+    },
+  };
+
+  const attempts = Array.from({ length: MAX_REVIEW_STATE_TEMPORARIES + 1 }, () =>
+    saveState(stateFile, replacement, saveOptions));
+  await firstRead;
+  // The first capacity check is held at a barrier. A second concurrent save
+  // must not observe the same count: the process queue serializes it behind
+  // creation of the first reserved temporary file.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(readdirCalls, 1);
+  releaseFirstRead();
+
+  const results = await Promise.allSettled(attempts);
+  assert.equal(
+    results.filter(({ status, reason }) =>
+      status === 'rejected' && /simulated pre-rename failure/u.test(reason.message),
+    ).length,
+    MAX_REVIEW_STATE_TEMPORARIES,
+  );
+  assert.equal(
+    results.filter(({ status, reason }) =>
+      status === 'rejected' && /temporary retention limit reached/u.test(reason.message),
+    ).length,
+    1,
+  );
+  assert.equal(
+    (await readdir(directory)).filter((name) => name.includes('.tmp-')).length,
+    MAX_REVIEW_STATE_TEMPORARIES,
+  );
+});
+
 test('temporary-path replacement cannot chmod a victim or replace state', {
   skip: process.platform === 'win32',
 }, async (t) => {
