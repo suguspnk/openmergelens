@@ -373,6 +373,54 @@ test('invokeReviewer surfaces a POSIX forced tree termination failure', {
   );
 });
 
+test('invokeReviewer starts a Windows forced tree stop before the leader closes', {
+  timeout: 2_000,
+}, async () => {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdin = new EventEmitter();
+  child.stdin.write = () => true;
+  child.stdin.end = () => {};
+  const calls = [];
+  let releaseForce;
+  let forceStartedResolve;
+  const forceStarted = new Promise((resolve) => {
+    forceStartedResolve = resolve;
+  });
+  const forceCompletion = new Promise((resolve) => {
+    releaseForce = resolve;
+  });
+
+  const invocation = invokeReviewer({
+    reviewerCommand: 'stub-reviewer',
+    prompt: 'prompt',
+    timeoutMs: 10,
+    platform: 'win32',
+    prepare: async () => ({
+      command: 'stub-reviewer',
+      args: [],
+      options: {},
+    }),
+    spawnProcess: () => child,
+    terminate: async (_target, { force }) => {
+      calls.push(force);
+      if (!force) throw new Error('Windows timeout must not wait for graceful termination');
+      forceStartedResolve();
+      // Model taskkill beginning its tree walk while the leader is still
+      // alive, then the leader closing before the descendant is confirmed.
+      child.emit('close', 0);
+      await forceCompletion;
+    },
+  });
+  invocation.catch(() => {});
+
+  await forceStarted;
+  assert.deepEqual(calls, [true]);
+  releaseForce();
+  await assert.rejects(invocation, /timed out after 10ms/u);
+});
+
 test('invokeReviewer preserves launch errors when stdin also cannot accept the prompt', async () => {
   const reviewerCommand = `openmergelens-missing-reviewer-${process.pid}-${Date.now()}`;
 

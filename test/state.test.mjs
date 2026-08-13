@@ -1614,6 +1614,34 @@ test('Windows retention guard contenders retry while owner marker initialization
   assert.equal((await readdir(directory)).includes('.openmergelens-retention.guard'), false);
 });
 
+for (const marker of [
+  { name: 'empty', contents: '' },
+  { name: 'partial', contents: '{"version":1,"pid":' },
+]) {
+  test(`Windows retention guard reports a crashed ${marker.name} initialization after bounded retries`, async (t) => {
+    const directory = await mkdtemp(path.join(tmpdir(), `openmergelens-state-win-retention-guard-crashed-${marker.name}-`));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const guardPath = path.join(directory, '.openmergelens-retention.guard');
+    await writeFile(guardPath, marker.contents);
+
+    await assert.rejects(
+      saveState(path.join(directory, 'state.json'), {}, {
+        platform: 'win32',
+        retentionLockRetryLimit: 2,
+        retentionLockRetryDelayMs: 0,
+      }),
+      (error) => {
+        assert.equal(error.code, 'ERETENTIONGUARDCRASH');
+        assert.match(error.message, new RegExp(guardPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+        assert.match(error.message, /remove the guard file/u);
+        assert.match(error.message, /initialization did not complete/u);
+        return true;
+      },
+    );
+    assert.equal(await readFile(guardPath, 'utf8'), marker.contents);
+  });
+}
+
 test('Windows retention relocates a claimed marker when owner payload acquisition fails', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-owner-failure-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
