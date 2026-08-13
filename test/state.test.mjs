@@ -715,6 +715,14 @@ test('loading a symlink state never reads or chmods its target', {
   assert.equal((await lstat(stateFile)).isSymbolicLink(), true);
 });
 
+test('loading state fails closed when its parent or ancestor is missing', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-load-missing-parent-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const stateFile = path.join(root, 'missing-parent', 'state.json');
+
+  await assert.rejects(loadState(stateFile), { code: 'ENOENT' });
+});
+
 test('loading state from an owner-controlled conventional parent remains compatible', {
   skip: process.platform === 'win32',
 }, async (t) => {
@@ -1304,6 +1312,33 @@ test('temporary cleanup failure is surfaced without deleting the previous state'
   );
 });
 
+test('temporary cleanup propagates an injected parent lstat failure', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  await saveState(stateFile, {});
+
+  let failCleanup = false;
+  const cleanupFailure = Object.assign(new Error('cleanup parent lstat failed'), {
+    code: 'EIO',
+  });
+  const injectedLstat = async (candidate, options) => {
+    if (failCleanup && candidate === directory) throw cleanupFailure;
+    return lstat(candidate, options);
+  };
+
+  await assert.rejects(
+    saveState(stateFile, {}, {
+      lstat: injectedLstat,
+      commitRename: async () => {
+        failCleanup = true;
+        throw new Error('simulated commit failure');
+      },
+    }),
+    /simulated commit failure.*temporary cleanup also failed.*cleanup parent lstat failed/u,
+  );
+});
+
 test('parent replacement after verification cannot redirect commit or cleanup', {
   skip: process.platform === 'win32',
 }, async (t) => {
@@ -1482,6 +1517,54 @@ test('Windows state walks injected ancestor lstat results on non-Windows', async
     /parent directory realpath changed/u,
   );
   assert.equal(walkedAncestor, true);
+  await assert.rejects(stat(stateFile), { code: 'ENOENT' });
+});
+
+test('Windows state rejects a rechecked parent on another volume with the same file index', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-volume-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const directory = path.join(root, 'private');
+  const stateFile = path.join(directory, 'state.json');
+  await mkdir(directory, { mode: 0o700 });
+
+  let parentLstatCalls = 0;
+  const injectedLstat = async (candidate, options) => {
+    // The simulated Windows ancestor walk asks lstat() with Win32-shaped
+    // paths even though this regression runs on a POSIX host.
+    if (typeof candidate === 'string' && candidate.startsWith('\\')) {
+      return {
+        isDirectory: () => true,
+        isFile: () => false,
+        isSymbolicLink: () => false,
+      };
+    }
+    const stats = await lstat(candidate, options);
+    if (candidate !== directory) return stats;
+    parentLstatCalls += 1;
+    if (parentLstatCalls !== 2) return stats;
+    // Simulate a hosted Windows path/handle report where the file index is
+    // equal but the path resolves on another volume. The handle-side `ino`
+    // comparison remains valid; path-side volume binding must reject this.
+    const replacement = Object.assign(
+      Object.create(Object.getPrototypeOf(stats)),
+      stats,
+    );
+    replacement.dev = stats.dev + 1n;
+    return replacement;
+  };
+
+  await assert.rejects(
+    saveState(stateFile, {}, {
+      platform: 'win32',
+      realpath: async (parentPath) => parentPath,
+      lstat: injectedLstat,
+      commitRename: async () => {
+        throw new Error('commit must not run');
+      },
+    }),
+    /parent directory identity changed/u,
+  );
+  assert.equal(parentLstatCalls >= 2, true);
   await assert.rejects(stat(stateFile), { code: 'ENOENT' });
 });
 
