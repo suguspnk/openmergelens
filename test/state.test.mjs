@@ -1460,6 +1460,160 @@ test('Windows retention guard survives a crashed owner and requires explicit rec
   assert.equal(result.committed, true);
 });
 
+for (const guardFailure of [
+  {
+    name: 'owner stat failure',
+    phase: 'owner-stat',
+    error: /guard owner stat failure/u,
+  },
+  {
+    name: 'payload open failure',
+    phase: 'payload-open',
+    error: /guard payload open failure/u,
+  },
+  {
+    name: 'payload stat failure',
+    phase: 'payload-stat',
+    error: /guard payload stat failure/u,
+  },
+  {
+    name: 'identity failure',
+    phase: 'identity',
+    error: /guard identity failure/u,
+  },
+  {
+    name: 'owner payload write failure',
+    phase: 'write',
+    error: /guard owner payload write failure/u,
+  },
+  {
+    name: 'owner payload datasync failure',
+    phase: 'datasync',
+    error: /guard owner payload datasync failure/u,
+  },
+  {
+    name: 'owner payload short write',
+    phase: 'short-write',
+    error: /guard owner marker write was short/u,
+  },
+]) {
+  test(`Windows retention guard relocates its inode after ${guardFailure.name}`, async (t) => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-guard-init-failure-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const stateFile = path.join(directory, 'state.json');
+    const guardPath = path.join(directory, '.openmergelens-retention.guard');
+    let guardOpenCount = 0;
+    let failed = false;
+    const openWithGuardFailure = async (...args) => {
+      const opened = await open(...args);
+      if (args[0] !== guardPath || failed) return opened;
+      if (guardFailure.phase === 'payload-open' && guardOpenCount === 1) {
+        guardOpenCount += 1;
+        failed = true;
+        await opened.close();
+        throw new Error('guard payload open failure');
+      }
+      guardOpenCount += 1;
+      return new Proxy(opened, {
+        get(target, property, receiver) {
+          const fail = (message) => {
+            if (!failed) {
+              failed = true;
+              throw new Error(message);
+            }
+            return Reflect.get(target, property, receiver);
+          };
+          if (guardFailure.phase === 'owner-stat' && property === 'stat') {
+            return async (...statArgs) => {
+              if (!failed) {
+                failed = true;
+                throw new Error('guard owner stat failure');
+              }
+              return target.stat(...statArgs);
+            };
+          }
+          if (guardFailure.phase === 'payload-stat' && guardOpenCount === 2 && property === 'stat') {
+            return async () => fail('guard payload stat failure');
+          }
+          if (guardFailure.phase === 'write' && guardOpenCount === 2 && property === 'write') {
+            return async () => fail('guard owner payload write failure');
+          }
+          if (guardFailure.phase === 'datasync' && guardOpenCount === 2 && property === 'datasync') {
+            return async () => fail('guard owner payload datasync failure');
+          }
+          if (guardFailure.phase === 'short-write' && guardOpenCount === 2 && property === 'write') {
+            return async (...writeArgs) => {
+              if (!failed) {
+                failed = true;
+                return { bytesWritten: 0, buffer: undefined };
+              }
+              return target.write(...writeArgs);
+            };
+          }
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+    };
+    const lstatWithIdentityFailure = async (...args) => {
+      if (
+        guardFailure.phase === 'identity' &&
+        !failed &&
+        args[0] === guardPath
+      ) {
+        failed = true;
+        throw new Error('guard identity failure');
+      }
+      if (typeof args[0] === 'string' && args[0].includes('\\')) {
+        return lstat(directory, args[1]);
+      }
+      return lstat(...args);
+    };
+
+    await assert.rejects(
+      saveState(stateFile, {}, {
+        platform: 'win32',
+        openFile: openWithGuardFailure,
+        lstat: lstatWithIdentityFailure,
+        retentionLockRetryLimit: 1,
+        retentionLockRetryDelayMs: 0,
+      }),
+      guardFailure.error,
+    );
+    const afterFailure = await readdir(directory);
+    assert.equal(afterFailure.includes('.openmergelens-retention.guard'), false);
+    assert.equal(
+      afterFailure.filter((name) => name.startsWith('state.json.tmp-')).length,
+      1,
+      'the claimed guard inode is retained under a generated temporary name',
+    );
+
+    const result = await saveState(stateFile, {}, { platform: 'win32' });
+    assert.equal(result.committed, true);
+    assert.equal((await readdir(directory)).includes('state.json'), true);
+  });
+}
+
+test('Windows retention guard contenders retry while owner marker initialization is paused', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-guard-init-pause-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const guardPath = path.join(directory, '.openmergelens-retention.guard');
+  await writeFile(guardPath, '');
+  const contender = saveState(path.join(directory, 'contender-state.json'), {}, {
+    platform: 'win32',
+    retentionLockRetryLimit: 200,
+    retentionLockRetryDelayMs: 2,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  // Model the owner finishing initialization and releasing its marker. The
+  // contender must retry this empty in-progress marker rather than classifying
+  // it as a crashed owner.
+  await rm(guardPath);
+  const result = await contender;
+  assert.equal(result.committed, true);
+  assert.equal((await readdir(directory)).includes('.openmergelens-retention.guard'), false);
+});
+
 test('Windows retention relocates a claimed marker when owner payload acquisition fails', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-owner-failure-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
