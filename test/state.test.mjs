@@ -191,6 +191,60 @@ test('file identity requires exact bigint dev and ino values', () => {
   );
 });
 
+test('Windows state save and load fail closed when handle/path volumes differ', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-handle-volume-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const directory = path.join(root, 'private');
+  const stateFile = path.join(directory, 'state.json');
+  await mkdir(directory, { mode: 0o700 });
+
+  const makeInjectedLstat = (target) => async (candidate, options) => {
+    // Simulated Windows ancestor walks use Win32-shaped paths even though
+    // this regression runs with a POSIX temporary directory.
+    if (typeof candidate === 'string' && candidate.startsWith('\\')) {
+      return {
+        isDirectory: () => true,
+        isFile: () => false,
+        isSymbolicLink: () => false,
+      };
+    }
+    const stats = await lstat(candidate, options);
+    if (candidate !== target) return stats;
+    // A Windows file index is volume-scoped. Keeping ino equal while changing
+    // dev models a pathname observation from another volume; state operations
+    // must not accept the ino-only handle/path match.
+    const replacement = Object.assign(
+      Object.create(Object.getPrototypeOf(stats)),
+      stats,
+    );
+    replacement.dev = typeof stats.dev === 'bigint'
+      ? stats.dev + 1n
+      : stats.dev + 1;
+    return replacement;
+  };
+
+  await assert.rejects(
+    saveState(stateFile, {}, {
+      platform: 'win32',
+      realpath: async (parentPath) => parentPath,
+      lstat: makeInjectedLstat(directory),
+    }),
+    /identity is unsupported on this Windows filesystem/u,
+  );
+  await assert.rejects(stat(stateFile), { code: 'ENOENT' });
+
+  await writeFile(stateFile, '{}\n');
+  await assert.rejects(
+    loadState(stateFile, {
+      platform: 'win32',
+      realpath: async (parentPath) => parentPath,
+      lstat: makeInjectedLstat(stateFile),
+      hardenPermissions: false,
+    }),
+    /identity is unsupported on this Windows filesystem/u,
+  );
+});
+
 test('Windows file identity round-trips handles and rejects a replacement', {
   skip: process.platform !== 'win32',
 }, async (t) => {
@@ -1097,7 +1151,12 @@ test('permission hardening failure leaves the previous state committed', async (
   );
 
   assert.equal(await readFile(stateFile, 'utf8'), originalBytes);
-  assert.deepEqual(await readdir(directory), ['state.json']);
+  const names = await readdir(directory);
+  if (process.platform === 'win32') {
+    assert.equal(names.filter((name) => name.includes('.tmp-')).length, 1);
+  } else {
+    assert.deepEqual(names, ['state.json']);
+  }
 });
 
 test('temporary-path replacement cannot chmod a victim or replace state', {
@@ -1189,7 +1248,12 @@ test('atomic replacement failure preserves the previous state without backup rec
   );
 
   assert.equal(await readFile(stateFile, 'utf8'), originalBytes);
-  assert.deepEqual(await readdir(directory), ['state.json']);
+  const names = await readdir(directory);
+  if (process.platform === 'win32') {
+    assert.equal(names.filter((name) => name.includes('.tmp-')).length, 1);
+  } else {
+    assert.deepEqual(names, ['state.json']);
+  }
 });
 
 test('a post-rename verification failure reports an indeterminate committed state', async (t) => {
@@ -1243,7 +1307,12 @@ test('temporary flush failure leaves the previous state committed', async (t) =>
   );
 
   assert.equal(await readFile(stateFile, 'utf8'), originalBytes);
-  assert.deepEqual(await readdir(directory), ['state.json']);
+  const names = await readdir(directory);
+  if (process.platform === 'win32') {
+    assert.equal(names.filter((name) => name.includes('.tmp-')).length, 1);
+  } else {
+    assert.deepEqual(names, ['state.json']);
+  }
 });
 
 test('state commit flushes bytes then rename then parent directory', async (t) => {
@@ -1335,7 +1404,9 @@ test('unsupported Windows parent flush is reported as committed but not durable'
   assert.deepEqual(await loadState(stateFile), {});
 });
 
-test('temporary cleanup failure is surfaced without deleting the previous state', async (t) => {
+test('temporary cleanup failure is surfaced without deleting the previous state', {
+  skip: process.platform === 'win32',
+}, async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const stateFile = path.join(directory, 'state.json');
@@ -1363,7 +1434,9 @@ test('temporary cleanup failure is surfaced without deleting the previous state'
   );
 });
 
-test('temporary cleanup propagates an injected parent lstat failure', async (t) => {
+test('temporary cleanup propagates an injected parent lstat failure', {
+  skip: process.platform === 'win32',
+}, async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const stateFile = path.join(directory, 'state.json');
@@ -1388,6 +1461,45 @@ test('temporary cleanup propagates an injected parent lstat failure', async (t) 
     }),
     /simulated commit failure.*temporary cleanup also failed.*cleanup parent lstat failed/u,
   );
+});
+
+test('Windows cleanup retains a temporary replacement made after identity checks', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-cleanup-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = path.join(directory, 'state.json');
+  const initialState = {
+    [prKey('owner/repo', 1, reviewer)]: {
+      lastReviewedSha: 'sha-1',
+      lastReviewedAt: '2026-07-28T00:00:00.000Z',
+    },
+  };
+  await saveState(stateFile, initialState);
+  const originalBytes = await readFile(stateFile, 'utf8');
+  let replacementPath;
+  let removeCalls = 0;
+
+  await assert.rejects(
+    saveState(stateFile, {}, {
+      platform: 'win32',
+      beforeCommitRename: async (temporaryPath) => {
+        replacementPath = temporaryPath;
+        // This runs after the final pathname/descriptor identity checks. A
+        // pathname rm in cleanup would therefore delete the replacement.
+        await rm(temporaryPath);
+        await writeFile(temporaryPath, 'attacker replacement\n');
+        throw new Error('simulated commit failure after cleanup substitution');
+      },
+      removeTemporary: async (temporaryPath) => {
+        removeCalls += 1;
+        await rm(temporaryPath, { force: true });
+      },
+    }),
+    /simulated commit failure after cleanup substitution.*temporary cleanup also failed.*descriptor-relative cleanup is unavailable/u,
+  );
+
+  assert.equal(removeCalls, 0, 'Windows must not pathname-rm after descriptors close');
+  assert.equal(await readFile(stateFile, 'utf8'), originalBytes);
+  assert.equal(await readFile(replacementPath, 'utf8'), 'attacker replacement\n');
 });
 
 test('parent replacement after verification cannot redirect commit or cleanup', {
