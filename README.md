@@ -375,6 +375,12 @@ overrides must be relocated there before upgrading. Windows device aliases,
 including superscript `COM`/`LPT` forms, alternate streams, and names ending in
 a dot or space are rejected before path resolution. State bytes and the parent
 directory are flushed around atomic rename.
+On Windows, retained-temporary capacity reservations use a parent-scoped
+guard before inspecting or creating the retention marker, so stale-marker
+reclamation cannot race another OpenMergeLens contender. A guard whose owner
+process has disappeared is intentionally fail-closed and must be removed by
+an operator after confirming no save is active; this bounded recovery path
+avoids guessing about PID reuse or deleting a newer guard pathname.
 If the directory flush fails after rename, the committed state is retained and
 the poll emits a durability warning instead of rolling memory back; unsupported
 Windows directory flushes are reported through that same warning path. The

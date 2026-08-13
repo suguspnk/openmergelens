@@ -1417,7 +1417,50 @@ test('Windows retention fails closed on an orphan empty lock', async (t) => {
   assert.equal(renameCalls, 0, 'stale probing must not rename the lock pathname');
 });
 
-test('Windows retention keeps a claimed marker when owner payload acquisition fails', async (t) => {
+test('Windows retention guard survives a crashed owner and requires explicit recovery', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-guard-crash-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const guardPath = path.join(directory, '.openmergelens-retention.guard');
+  const child = spawn(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      `import { writeFile } from 'node:fs/promises';
+       const guard = process.argv[1];
+       await writeFile(guard, JSON.stringify({ version: 1, pid: process.pid, createdAt: Date.now() }) + '\\n', { flag: 'wx' });
+       process.stdout.write('ready\\n');`,
+      guardPath,
+    ],
+    { stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true },
+  );
+  await new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.stdout.once('data', resolve);
+  });
+  await new Promise((resolve) => child.once('close', resolve));
+
+  await assert.rejects(
+    saveState(path.join(directory, 'state.json'), {}, {
+      platform: 'win32',
+      retentionLockRetryLimit: 1,
+      retentionLockRetryDelayMs: 0,
+    }),
+    (error) => error.code === 'ERETENTIONGUARDCRASH' && /owner process is no longer live/u.test(error.message),
+  );
+  assert.equal((await readdir(directory)).includes('.openmergelens-retention.guard'), true);
+
+  // Explicit operator recovery removes only the verified crash marker. A
+  // subsequent save proves the bounded outage is recoverable without stale
+  // pathname stealing in the library.
+  await rm(guardPath);
+  const result = await saveState(path.join(directory, 'state.json'), {}, {
+    platform: 'win32',
+  });
+  assert.equal(result.committed, true);
+});
+
+test('Windows retention relocates a claimed marker when owner payload acquisition fails', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-owner-failure-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const stateFile = path.join(directory, 'state.json');
@@ -1441,11 +1484,11 @@ test('Windows retention keeps a claimed marker when owner payload acquisition fa
     /owner payload open failure/u,
   );
   const names = await readdir(directory);
-  assert.equal(names.includes('.openmergelens-retention.lock'), true);
+  assert.equal(names.includes('.openmergelens-retention.lock'), false);
   assert.equal(
     names.some((name) => name.startsWith('state.json.tmp-')),
-    false,
-    'the claimed inode stays at the lock pathname because descriptor-relative cleanup is unavailable',
+    true,
+    'the claimed inode is retained as evidence while releasing the lock pathname',
   );
 });
 
