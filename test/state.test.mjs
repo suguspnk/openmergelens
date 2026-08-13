@@ -106,19 +106,11 @@ test('file identity requires exact bigint dev and ino values', () => {
     ),
     true,
   );
-  assert.equal(
-    sameFileIdentity(
-      identityStats({ dev: 11, ino: 22 }),
-      identityStats({ dev: 99, ino: 22 }),
-      { platform: 'win32' },
-    ),
-    true,
-  );
   assert.throws(
     () => sameFileIdentity(
       identityStats({ dev: 11, ino: 22 }),
       identityStats({ dev: 99, ino: 22 }),
-      { platform: 'win32', requireVolumeMatch: true },
+      { platform: 'win32' },
     ),
     /identity is unsupported on this Windows filesystem/u,
   );
@@ -1637,6 +1629,53 @@ test('Windows state rejects a rechecked parent on another volume with the same f
   assert.equal(parentLstatCalls >= 2, true);
   assert.equal(commitCalled, false);
   await assert.rejects(stat(stateFile), { code: 'ENOENT' });
+});
+
+test('Windows state load rejects a rechecked parent on another volume with the same file index', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-load-volume-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const directory = path.join(root, 'private');
+  const stateFile = path.join(directory, 'state.json');
+  await mkdir(directory, { mode: 0o700 });
+  await writeFile(stateFile, '{}\n');
+
+  let parentLstatCalls = 0;
+  const injectedLstat = async (candidate, options) => {
+    // Simulated Windows ancestor walks use Win32-shaped paths even though
+    // this regression runs with a POSIX temporary directory.
+    if (typeof candidate === 'string' && candidate.startsWith('\\')) {
+      return {
+        isDirectory: () => true,
+        isFile: () => false,
+        isSymbolicLink: () => false,
+      };
+    }
+    const stats = await lstat(candidate, options);
+    if (candidate !== directory) return stats;
+    parentLstatCalls += 1;
+    if (parentLstatCalls !== 2) return stats;
+    // Keep the file index equal while changing the volume identifier. The
+    // path-to-path binding must reject this before state bytes are read.
+    const replacement = Object.assign(
+      Object.create(Object.getPrototypeOf(stats)),
+      stats,
+    );
+    replacement.dev = typeof stats.dev === 'bigint'
+      ? stats.dev + 1n
+      : stats.dev + 1;
+    return replacement;
+  };
+
+  await assert.rejects(
+    loadState(stateFile, {
+      platform: 'win32',
+      realpath: async (parentPath) => parentPath,
+      lstat: injectedLstat,
+      hardenPermissions: false,
+    }),
+    /parent directory identity changed/u,
+  );
+  assert.equal(parentLstatCalls >= 2, true);
 });
 
 test('Windows state save rechecks the parent realpath immediately before atomic commit', async (t) => {
