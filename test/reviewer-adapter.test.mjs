@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -332,6 +333,92 @@ test('invokeReviewer rejects a stdin failure when the reviewer otherwise exits s
     }),
     /failed to send prompt.*write (?:EPIPE|EOF)/,
   );
+});
+
+test('invokeReviewer surfaces a POSIX forced tree termination failure', {
+  timeout: 2_000,
+}, async () => {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdin = new EventEmitter();
+  child.stdin.write = () => true;
+  child.stdin.end = () => {};
+  const terminationFailure = Object.assign(
+    new Error('group and leader termination failed'),
+    { code: 'ETERMINATE' },
+  );
+
+  await assert.rejects(
+    invokeReviewer({
+      reviewerCommand: 'stub-reviewer',
+      prompt: 'prompt',
+      timeoutMs: 10,
+      platform: 'linux',
+      prepare: async () => ({
+        command: 'stub-reviewer',
+        args: [],
+        options: {},
+      }),
+      spawnProcess: () => child,
+      terminate: async (_target, { force }) => {
+        if (force) throw terminationFailure;
+      },
+    }),
+    (err) =>
+      err?.code === 'ETERMINATE' &&
+      err?.terminalCode === 'ETIMEDOUT' &&
+      err?.timeoutCode === 'ETIMEDOUT' &&
+      err?.cause === terminationFailure,
+  );
+});
+
+test('invokeReviewer starts a Windows forced tree stop before the leader closes', {
+  timeout: 2_000,
+}, async () => {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdin = new EventEmitter();
+  child.stdin.write = () => true;
+  child.stdin.end = () => {};
+  const calls = [];
+  let releaseForce;
+  let forceStartedResolve;
+  const forceStarted = new Promise((resolve) => {
+    forceStartedResolve = resolve;
+  });
+  const forceCompletion = new Promise((resolve) => {
+    releaseForce = resolve;
+  });
+
+  const invocation = invokeReviewer({
+    reviewerCommand: 'stub-reviewer',
+    prompt: 'prompt',
+    timeoutMs: 10,
+    platform: 'win32',
+    prepare: async () => ({
+      command: 'stub-reviewer',
+      args: [],
+      options: {},
+    }),
+    spawnProcess: () => child,
+    terminate: async (_target, { force }) => {
+      calls.push(force);
+      if (!force) throw new Error('Windows timeout must not wait for graceful termination');
+      forceStartedResolve();
+      // Model taskkill beginning its tree walk while the leader is still
+      // alive, then the leader closing before the descendant is confirmed.
+      child.emit('close', 0);
+      await forceCompletion;
+    },
+  });
+  invocation.catch(() => {});
+
+  await forceStarted;
+  assert.deepEqual(calls, [true]);
+  releaseForce();
+  await assert.rejects(invocation, /timed out after 10ms/u);
 });
 
 test('invokeReviewer preserves launch errors when stdin also cannot accept the prompt', async () => {
@@ -1019,7 +1106,13 @@ test('invokeMultiPassReview rejects malformed synthesis output', async () => {
   assert.equal(invocation, 2);
 });
 
-test('invokeReviewer force-kills a descendant after the direct child closes on timeout', async (t) => {
+test('invokeReviewer force-kills a descendant after the direct child closes on timeout', {
+  // Windows taskkill reports status 128 when the short-lived direct child
+  // exits between timeout detection and tree enumeration. Process-tree
+  // semantics are covered by the deterministic terminateProcessTree tests;
+  // this real descendant fixture is POSIX-only to avoid a scheduler race.
+  skip: process.platform === 'win32',
+}, async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-reviewer-tree-test-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const pidFile = path.join(directory, 'descendant.pid');

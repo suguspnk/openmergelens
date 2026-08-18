@@ -2,9 +2,8 @@
 
 Local, agent-agnostic poller that auto-reviews open GitHub PRs whenever a
 configured account is the requested reviewer. The request can be added manually
-or created automatically by a matching `CODEOWNERS` rule. It also re-reviews
-previously reviewed PRs for the exact host, account, and repository when their
-head changes, using a bounded tracked-state fallback rather than global search.
+or created automatically by a matching `CODEOWNERS` rule. It re-reviews a new
+head only when GitHub returns that PR from a fresh active review-request search.
 Posts results as a formal GitHub PR review with inline comments automatically,
 with no per-run approval needed.
 
@@ -33,9 +32,8 @@ the shipped CLI and its tests when behavior changes.
      **new commits since the last review** so a freshly requested re-review can
      target the new head. State is keyed by reviewer account + PR + last-reviewed
      commit SHA, not a boolean seen/unseen flag. new commits alone are not a trigger
-     for an untracked PR; the PR author must request that account again in GitHub's **Reviewers**
-     list before it enters discovery. Previously
-     tracked PRs are eligible through the bounded fallback.
+     for any PR; the PR author must request that account again in GitHub's
+     **Reviewers** list before the new head enters discovery.
   3. Needs a real review prompt, not "review this PR." Prompts are directly
      editable and shared per GitHub host/repository. Durable corrections are
      isolated per GitHub host/account/repository.
@@ -80,8 +78,9 @@ openmergelens/
 ## Per-user runtime state
 
 All per-user runtime state lives outside this repository under the user home:
-`~/.openmergelens/` by default, or the directory selected by the
-`OPENMERGELENS_HOME` environment variable. This includes `config.json`,
+`~/.openmergelens/` by default, or on POSIX the directory selected by the
+`OPENMERGELENS_HOME` environment variable. Windows requires the canonical
+per-user default. This includes `config.json`,
 `state.json`, `poll.log`, retained `reports/`, editable `docs/review-prompts/`
 and `docs/learnings/` files, and the generated `scheduler-environment.json`.
 The repository `.gitignore` still ignores local-runtime names such as
@@ -101,31 +100,44 @@ poller as a `pnpm` script / bin.
 
 1. **Discover candidate PRs.** For every configured account and every
    explicitly selected repository, search for open PRs that currently request
-   that account's review, then merge those results with locally tracked PR
-   numbers for the exact host/account/repository. Tracked state is a bounded
-   fallback: it never expands discovery beyond PRs previously recorded for
-   that configured identity and repository. For each target:
+   that account's review. Validated search results are the only source of
+   review candidates; locally tracked PR numbers never enter the queue by
+   themselves. For each target:
    ```bash
    gh api --paginate --method GET /search/issues -f q="is:pr is:open review-requested:USERNAME repo:OWNER/REPO" -f per_page=100 --jq '"meta|" + (.total_count | tostring) + "|" + (.incomplete_results | tostring), (.items[] | .repository_url + "|" + (.number | tostring))'
    ```
    This covers both manual reviewer requests and requests GitHub created from a
    matching `CODEOWNERS` rule. Global search is intentionally unsupported:
-   coverage must be explicit. Requested candidates are prioritized ahead of
-   tracked fallback candidates, and the fallback remains limited to PRs already
-   recorded for that identity and repository.
+   coverage must be explicit. Admission requires stable pagination metadata plus
+   distinct candidate and page counts that agree with that metadata.
+   Authentication failures, search failures, incomplete or capped results,
+   inconsistent pagination, count mismatches, or any malformed/foreign row fail
+   the complete account/repository scope closed.
    The paginated output starts each page with `meta|total_count|incomplete_results`
-   and then emits newline-delimited `repository_url|number` pairs. If Search
-   reports more than 1,000 matches or an incomplete result window, the
-   implementation falls back to the paginated repository pull-request list
-   endpoint and filters its `requested_reviewers` to the direct user.
+   and then emits newline-delimited `repository_url|number` pairs. Search results
+   absent from a page are never authoritative evidence for deleting review state
+   or scheduling cursors, because concurrent membership changes can preserve the
+   reported count while moving an item across page boundaries. Historical state
+   is retained but cannot enter the candidate queue or consume metadata budget.
+   Review records expire locally after exactly 365 days. Before returning from
+   a real poll, including an empty poll, rotating maintenance shares at most 25
+   remote operations between exact marker proof and direct closure checks for
+   historical records in selected, authenticated, configured
+   account/repository scopes. It deletes closed state only for exact keys
+   directly confirmed `CLOSED` or `MERGED`; search absence, lookup failure,
+   malformed metadata, HTTP 404, and `OPEN` all retain state. Deconfigured and
+   unscoped records receive only local expiry, never remote checks. A requested
+   candidate confirmed closed or merged at initial fetch, after generation, or
+   at the mutation boundary is also retired by exact key. Dry runs never mutate
+   state.
    Global search is intentionally unsupported: coverage must be explicit.
    Resolve each account with `gh auth token --hostname ... --user ...` and
    scope every child command with that credential.
 
 2. **Review candidates in bounded concurrent batches.** Build an independent
-   queue per account, deduplicate within that account, prioritize currently
-   requested candidates ahead of tracked fallback candidates, then round-robin
-   the queues into one global queue. Process up to `reviewBatchSize` PRs
+   queue per account, deduplicate validated requested candidates within that
+   account, then round-robin its repository queues into one global queue.
+   Process up to `reviewBatchSize` PRs
    concurrently across all accounts (default `5`), subject to a built-in
    admission cap of three reviews that bounds aggregate diff, gateway, prompt,
    and reviewer-process memory.
@@ -138,9 +150,13 @@ poller as a `pnpm` script / bin.
    - Key: `HOST@USERNAME::OWNER/REPO#N`
    - If key absent → new PR, needs review.
    - If key present and stored SHA != current `headRefOid` → new commits since
-     last review; if this PR was returned by either the requested-reviewer
-     search or the bounded tracked fallback, it needs re-review.
+     last review; if this PR was returned by the active requested-reviewer
+     search, it needs re-review.
    - If key present and SHA matches → skip, already reviewed this exact head.
+   - After `needsReview` succeeds, a real poll reserves the exact final record's
+     canonical key, SHA, timestamp, entry count, and serialized UTF-8 bytes
+     before marker reconciliation, diff fetch, prompt reads, or AI work. A dry
+     run does not reserve persistence capacity.
    - If local state is missing, check the PR's submitted reviews for
      OpenMergeLens's opaque account/repo/commit marker. If found, repair local
      state and skip generation/posting. This closes the crash window between a
@@ -198,11 +214,15 @@ poller as a `pnpm` script / bin.
    tool/gateway, reconciles those candidates against the current cumulative PR,
    merges duplicate root causes, discards unsupported claims, and returns the
    one summary/findings result to post.
-   Re-fetch metadata after review. If the head SHA changed during inspection,
+   Re-fetch metadata after review. If the PR is closed or merged, retire only
+   that account's exact tracked key. If the head SHA changed during inspection,
    discard the stale result, report the candidate as deferred, and leave state
-   untouched so the next poll retries against the new head. If any pass or
-   synthesis invocation fails or returns malformed output, skip posting and
-   leave state untouched so the next poll retries.
+   untouched so the next poll retries against the new head. Revalidate that the
+   exact configured user login is still in GitHub's requested-reviewer list;
+   a revoked request skips posting, while a failed or malformed lookup fails
+   closed without advancing state. If any pass or synthesis invocation fails
+   or returns malformed output, skip posting and leave state untouched so the
+   next poll retries.
 
 6. **Post the review.** **Decided: formal GitHub PR review via the REST
    reviews endpoint**, not a plain issue comment. It shows up in the PR's review
@@ -228,7 +248,14 @@ poller as a `pnpm` script / bin.
    OpenMergeLens and the authenticated reviewer. The opaque marker remains
    only for idempotent reconciliation, not as the disclosure mechanism.
    Review POSTs are globally serialized with at least one second between
-   mutations and pause according to GitHub rate-limit signals.
+   mutations and pause according to GitHub rate-limit signals. Immediately
+   before every POST, including the HTTP 422 summary-only fallback, re-fetch
+   metadata and the requested-reviewer list and require the PR to be `OPEN`,
+   the head to match, and the exact configured user request to remain active.
+   Revocation is an expected no-post outcome; lookup failure fails closed.
+   Read-only reconciliation is not a POST mutation and remains permitted after
+   a successful or ambiguous POST, because GitHub may clear the request once a
+   review is submitted.
    Findings the adapter couldn't anchor to a specific file/line fall back
    into the top-level review `body` (the summary), so nothing silently
    drops just because a line reference was missing. Include a deterministic,
@@ -392,22 +419,29 @@ Repository targets are always explicit `OWNER/REPO` strings.
 
 ## State file shape (local-only user state)
 
-`stateFile` supports an explicit absolute path. Relative values are resolved
-under the user home described above, so the `"./state.json"` value in
+On POSIX, `stateFile` supports an explicit absolute path subject to the
+ownership and mode checks below. Windows cannot portably verify an arbitrary
+parent ACL or reparse-point chain through Node, so Windows must use the canonical
+per-user OpenMergeLens home without an `OPENMERGELENS_HOME` override and
+`stateFile` must name a direct file in that directory. Existing Windows
+overrides require explicit relocation before upgrade. Relative values are resolved
+under the user home, so the `"./state.json"` value in
 `config.example.json` means `~/.openmergelens/state.json` by default (or the
-corresponding path under `OPENMERGELENS_HOME`).
+corresponding path under `OPENMERGELENS_HOME` on POSIX).
 
 ```json
 {
-  "github.com@antonio::OWNER/socialpostai-v2#123": {
+  "github.com@antonio::owner/socialpostai-v2#123": {
     "lastReviewedSha": "abc123...",
-    "lastReviewedAt": "2026-07-24T18:00:00Z"
+    "lastReviewedAt": "2026-07-24T18:00:00.000Z",
+    "reviewMarkerVersion": 1
   },
   "__openmergelens": {
     "version": 1,
     "candidateCursors": {
-      "github.com@antonio::OWNER/socialpostai-v2::requested": 25
-    }
+      "github.com@antonio::owner/socialpostai-v2::requested": 25
+    },
+    "reviewStateGcAfterKey": "github.com@antonio::owner/socialpostai-v2#123"
   }
 }
 ```
@@ -415,6 +449,115 @@ corresponding path under `OPENMERGELENS_HOME`).
 The reserved `__openmergelens` entry is optional scheduler metadata, not a
 review record. It advances bounded candidate windows independently per account,
 repository, and discovery source when one poll cannot inspect every candidate.
+Its optional `reviewStateGcAfterKey` cursor remains readable for states written
+by earlier releases. New closure-cleanup progress uses byte-neutral field order
+inside the last checked review entry, so a cursor can advance even at the file
+ceiling without adding metadata. Marker-proof work rotates review-entry order deterministically:
+each checked entry moves behind the other entries in its scope and each checked
+scope moves behind the other scopes. A poll batches all unsuccessful proof
+progress into one atomic order-only save. Reordering adds no bytes at the
+state-file ceiling, remains independent of closure cleanup, and keeps version 1 metadata
+readable by earlier strict readers.
+
+An unreleased intermediate build wrote two extra version 1 proof-cursor
+fields. A non-dry poll accepts those fields once, converts their last position
+to the byte-neutral entry order for every stored scope plus the global scope
+position, and atomically saves predecessor-readable metadata before
+authentication or GitHub work. If that migration save fails, the poll stops with
+the original file untouched. Dry runs preserve their no-write guarantee, so
+downgrade after encountering that intermediate state requires one successful
+non-dry migration first.
+
+The file is ordinarily read with a 16 MiB pre-parse bound and can contain at
+most 10,000 review records. The explicit predecessor-capacity migration may
+read at most 32 MiB. While a byte-neutral repair is still above the ordinary
+limit, its canonical progress save uses compact JSON so pretty-print expansion
+cannot exceed that predecessor envelope; the final repaired save returns to
+the ordinary pretty-printed format and limits. Larger files still fail before
+parsing. Scoped keys are canonical lowercase
+`HOST@USERNAME::owner/repo#N`; the only compatible legacy form is lowercase
+`owner/repo#N`, with case-only aliases normalized and one-account legacy state
+adopted before external work. Host, user, repository, and positive decimal PR
+segments are validated. Records reject unknown fields, limit SHAs to 128
+characters, require canonical ISO timestamps no more than five minutes in the
+future, and optionally carry only `reviewMarkerVersion: 1`. Invalid state is
+left untouched and fails before authentication or GitHub work.
+
+Atomic state replacement requires a non-symlink parent directory owned by the
+current user and not group/other-writable on POSIX. This keeps existing absolute
+state paths under conventional owner-controlled `0755` directories compatible
+without relocating state or mutating the configured parent; writable shared
+parents still fail closed. Reads validate that parent and a user-owned regular,
+non-symlink state file through held handles, and permission hardening uses the
+verified file handle before parsing. Writes retain handles for the directory and
+private temporary file, revalidate both identities, then perform one atomic
+temporary-to-target replacement as the commit operation. Because Node does not
+expose descriptor-relative rename, the writer treats that rename as provisional
+until the configured parent and committed target are rebound to the held parent
+and temporary-file identities; a final-boundary parent swap fails closed. The prior target is
+never moved aside first, so a failed pre-commit step leaves it in place; unsafe
+temporary cleanup is surfaced instead of deleting through a replaced parent.
+The writer flushes replacement bytes before rename and the held parent directory
+after rename. A parent-directory flush failure is explicitly post-commit: it is
+reported as a durability warning while retaining the committed in-memory and
+on-disk state instead of pretending rollback occurred. Filesystems where
+Windows directory flush is unsupported use the same committed-but-not-confirmed
+warning status rather than claiming crash durability. If target or parent
+verification fails after the namespace rename, the result is explicitly
+indeterminate rather than rolled back: the poll strictly reloads the state path
+before any later queued write and disables later writes if reconciliation fails.
+Windows state filenames also reject Win32 device aliases (including superscript
+`COM`/`LPT` forms), alternate streams, and trailing-dot or trailing-space
+equivalents before resolution.
+
+One legacy file containing more than 10,000 otherwise valid records can upgrade
+through deterministic 365-day expiry plus at most 1,000 authenticated PR-state
+checks per poll. Remote checks require valid config-wide AI-processing consent.
+Each repair lookup is capped at five seconds, the repair window at 15 seconds,
+and three failed or malformed responses stop that poll's remote repair work.
+Authentication is scheduled in bounded batches only while the same end-to-end
+repair deadline remains live. Each authentication subprocess receives the
+remaining request timeout. On POSIX, a process that ignores graceful termination
+has its detached tree force-killed after a bounded grace period even when the
+leader exits first. On Windows, forced tree termination begins immediately at
+the timeout boundary while the leader PID still identifies its descendants.
+Failure or nonzero exit from Windows `taskkill /t /f` is surfaced as a tree
+termination failure rather than a successful timeout cleanup.
+Confirmed-deletion capacity is projected with
+incremental exact entry and UTF-8 byte accounting rather than repeatedly
+serializing the full legacy state.
+If authentication consumes the deadline, all records for that attempted account
+batch move byte-neutrally behind the remaining reviewer scopes before the
+progress save, so a later account leads the next poll.
+An unsuccessful window is rotated byte-neutrally in the existing entry order so
+later windows are eventually inspected. Confirmed `CLOSED` or `MERGED` records
+accumulate across those atomic progress saves; other records are never pruned.
+For a one-account file, unscoped legacy keys are adopted before selecting the
+authenticated repair window. Repair/progress is saved atomically before
+discovery. Malformed or still-active excess records fail closed.
+
+One shared serializer measures exact pretty-printed UTF-8 output for both
+admission and the atomic temporary-file save. Configuration is limited to
+10,000 canonical account/repository scopes independent of an account selector.
+After initial metadata and `needsReview`, real polls reserve the candidate's
+exact final key, SHA, timestamp, entry count, and bytes before marker
+reconciliation, diff fetch, prompt reads, or AI; dry runs do not reserve.
+Configured scopes have equal soft entry and byte shares and can borrow unused
+global space. Under pressure, deterministic reclaim selects the largest
+normalized overage then scope key, and the oldest timestamp then key within
+that donor. It never crosses the constrained dimension's configured floor and
+never evicts the current key, an active reservation, unscoped/invalid state, or
+a record without exact marker proof; deconfigured scopes have zero floors.
+Only an authenticated, nonpending, exact repo/PR/SHA marker can establish
+`reviewMarkerVersion: 1`. Planning, pruning, reservation, and state commits are
+serialized, and failed saves restore the complete in-memory batch.
+
+Review records expire exactly 365 days after `lastReviewedAt`. This bounds
+storage at the cost that an unchanged, still-requested PR can become eligible
+again after expiry if its prior marker cannot be reconciled. The rotating
+historical-maintenance budget remains 25 remote operations per real poll and is
+shared by direct closure checks and marker proof; absence, malformed responses,
+errors, and HTTP 404 retain the record.
 
 ## Scheduling
 

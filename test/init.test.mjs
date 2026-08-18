@@ -1,10 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createTestHome, environmentWithTestHome } from './test-home.mjs';
 import {
   applyScheduleSelection,
   buildSetupConfig,
@@ -221,12 +220,11 @@ test('init forwards isolated scheduler options through finalization', async () =
 });
 
 test('init exits clearly instead of waiting for prompts without a TTY', async (t) => {
-  const userHome = await mkdtemp(path.join(tmpdir(), 'openmergelens-init-'));
-  t.after(() => rm(userHome, { recursive: true, force: true }));
+  const userHome = await createTestHome(t, 'openmergelens-init-');
 
   const child = spawn(process.execPath, ['bin/init.mjs'], {
     cwd: projectRoot,
-    env: { ...process.env, OPENMERGELENS_HOME: userHome },
+    env: environmentWithTestHome(process.env, userHome),
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   t.after(() => {

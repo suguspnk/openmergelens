@@ -3,19 +3,17 @@ import assert from 'node:assert/strict';
 import {
   chmod,
   mkdir,
-  mkdtemp,
   readFile,
-  rm,
   stat,
   writeFile,
 } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   ensureReviewPrompt,
   reviewPromptPathFor,
 } from '../lib/review-prompts.mjs';
+import { createTestHome, setProcessTestHome } from './test-home.mjs';
 
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -23,14 +21,8 @@ const projectRoot = path.resolve(
 );
 
 async function withHome(t) {
-  const home = await mkdtemp(path.join(tmpdir(), 'openmergelens-prompts-'));
-  const original = process.env.OPENMERGELENS_HOME;
-  process.env.OPENMERGELENS_HOME = home;
-  t.after(async () => {
-    if (original === undefined) delete process.env.OPENMERGELENS_HOME;
-    else process.env.OPENMERGELENS_HOME = original;
-    await rm(home, { recursive: true, force: true });
-  });
+  const home = await createTestHome(t, 'openmergelens-prompts-');
+  setProcessTestHome(t, home);
   return home;
 }
 

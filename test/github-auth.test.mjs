@@ -1,9 +1,482 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import {
   authEnvironment,
+  listAuthenticatedAccounts,
   parseAuthStatus,
+  resolveGitHubAuth,
+  runGitHubAuthCommand,
 } from '../lib/github-auth.mjs';
+
+const partialAuthStatus = `github.com
+  ✓ Logged in to github.com account octocat (keyring)
+  - Active account: true
+`;
+
+test('listAuthenticatedAccounts salvages completed non-zero auth status output', async () => {
+  const accounts = await listAuthenticatedAccounts({
+    runCommand: async () => {
+      throw Object.assign(new Error('one stored account is invalid'), {
+        code: 1,
+        signal: null,
+        completedExit: true,
+        stdout: partialAuthStatus,
+        stderr: '',
+      });
+    },
+  });
+
+  assert.deepEqual(accounts, [{
+    hostname: 'github.com',
+    username: 'octocat',
+    active: true,
+  }]);
+});
+
+test('listAuthenticatedAccounts propagates abnormal errors despite partial output', async () => {
+  const terminationFailure = Object.assign(new Error('tree termination failed'), {
+    code: 'ETERMINATE',
+    stdout: partialAuthStatus,
+    stderr: '',
+  });
+
+  await assert.rejects(
+    listAuthenticatedAccounts({
+      runCommand: async () => { throw terminationFailure; },
+    }),
+    (err) => err === terminationFailure,
+  );
+});
+
+test('listAuthenticatedAccounts does not infer a completed exit from a numeric error code', async () => {
+  const outputLimitFailure = Object.assign(new Error('auth output exceeded limit'), {
+    code: 1,
+    signal: null,
+    stdout: partialAuthStatus,
+    stderr: '',
+  });
+
+  await assert.rejects(
+    listAuthenticatedAccounts({
+      runCommand: async () => { throw outputLimitFailure; },
+    }),
+    (err) => err === outputLimitFailure,
+  );
+});
+
+test('GitHub auth rejects output that exceeds the byte cap', async () => {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.pid = 4321;
+  const terminationCalls = [];
+  let releaseTermination;
+  const termination = new Promise((resolve) => {
+    releaseTermination = resolve;
+  });
+  const invocation = runGitHubAuthCommand('gh', ['auth', 'status'], {
+      environment: {},
+      spawnProcess: () => child,
+      terminate: (_child, options) => {
+        terminationCalls.push(options);
+        return termination;
+      },
+    });
+  child.stdout.emit('data', Buffer.alloc((1024 * 1024) - 1, 0x61));
+  child.stdout.emit('data', Buffer.from('€'));
+  child.emit('close', 1, 'SIGKILL');
+  let settled = false;
+  void invocation.then(
+    () => { settled = true; },
+    () => { settled = true; },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false, 'overflow must await forced tree termination');
+  // Data arriving after overflow is ignored while the detached tree is
+  // being terminated; it must not accumulate or alter the rejection.
+  child.stdout.emit('data', Buffer.from('post-overflow-secret'));
+  releaseTermination();
+  await assert.rejects(
+    invocation,
+    (err) => {
+      assert.equal(err?.code, 'EOVERFLOW');
+      assert.match(err.message, /stdout exceeded/u);
+      assert.equal(err.stdout, '');
+      assert.equal(err.stderr, '');
+      return true;
+    },
+  );
+  assert.ok(
+    terminationCalls.some(({ force }) => force === true),
+    'overflow must request forced process-tree cleanup',
+  );
+  assert.ok(
+    terminationCalls.every(({ platform }) => platform === process.platform),
+    'cleanup must use the configured platform',
+  );
+});
+
+test('GitHub auth surfaces forced tree termination failure after output overflow', async () => {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.pid = 4321;
+  const terminationFailure = Object.assign(
+    new Error('taskkill leaked secret bytes'),
+    { code: 'ETERMINATE' },
+  );
+  const invocation = runGitHubAuthCommand('gh', ['auth', 'status'], {
+    environment: {},
+    spawnProcess: () => child,
+    platform: 'win32',
+    terminate: async () => { throw terminationFailure; },
+  });
+  child.stdout.emit('data', Buffer.alloc(1024 * 1024, 0x61));
+  child.stdout.emit('data', Buffer.from('overflow-secret'));
+  child.emit('close', 1, 'SIGKILL');
+
+  await assert.rejects(
+    invocation,
+    (err) => {
+      assert.equal(err?.code, 'ETERMINATE');
+      assert.equal(err?.overflowCode, 'EOVERFLOW');
+      assert.equal(err?.cause, terminationFailure);
+      assert.equal(err.stdout, '');
+      assert.equal(err.stderr, '');
+      return true;
+    },
+  );
+});
+
+test('GitHub auth overflow cancels a delayed timeout and performs one cleanup', async () => {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.pid = 4321;
+  const terminationCalls = [];
+  let releaseTermination;
+  const termination = new Promise((resolve) => {
+    releaseTermination = resolve;
+  });
+  const invocation = runGitHubAuthCommand('gh', ['auth', 'status'], {
+    timeoutMs: 5,
+    hardKillGraceMs: 1,
+    environment: {},
+    spawnProcess: () => child,
+    terminate: (_child, options) => {
+      terminationCalls.push(options);
+      return termination;
+    },
+  });
+  child.stdout.emit('data', Buffer.alloc(1024 * 1024, 0x61));
+  child.stdout.emit('data', Buffer.from('overflow-secret'));
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  releaseTermination();
+
+  await assert.rejects(invocation, (err) => err?.code === 'EOVERFLOW');
+  assert.deepEqual(terminationCalls, [{
+    platform: process.platform,
+    force: true,
+  }]);
+});
+
+test('GitHub auth counts split UTF-8 output by raw bytes at the cap', async () => {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.pid = 4321;
+  const invocation = runGitHubAuthCommand('gh', ['auth', 'status'], {
+    environment: {},
+    spawnProcess: () => child,
+    terminate: async () => {},
+  });
+
+  // The three-byte sequence is deliberately split across data events. The
+  // response is exactly at the byte cap and must not be rejected because a
+  // per-chunk decoder would turn the partial sequence into replacement text.
+  child.stdout.emit('data', Buffer.alloc((1024 * 1024) - 3, 0x61));
+  child.stdout.emit('data', Buffer.from([0xe2]));
+  child.stdout.emit('data', Buffer.from([0x82]));
+  child.stdout.emit('data', Buffer.from([0xac]));
+  child.emit('close', 0, null);
+
+  const result = await invocation;
+  assert.equal(Buffer.byteLength(result.stdout, 'utf8'), 1024 * 1024);
+  assert.equal(result.stdout.endsWith('€'), true);
+});
+
+test('resolveGitHubAuth preserves a sanitized abnormal token-command failure', async () => {
+  const secret = 'SENSITIVE_AUTH_BYTES_MUST_NOT_ESCAPE';
+  const terminationFailure = Object.assign(new Error(`cleanup failed: ${secret}`), {
+    code: 'ETERMINATE',
+    timeoutCode: 'ETIMEDOUT',
+    overflowCode: 'EOVERFLOW',
+    stdout: secret,
+    stderr: `token=${secret}`,
+  });
+
+  await assert.rejects(
+    resolveGitHubAuth(
+      { hostname: 'github.com', username: 'octocat', repositories: ['owner/repo'] },
+      { runCommand: async () => { throw terminationFailure; } },
+    ),
+    (err) => {
+      assert.equal(err.code, 'EGITHUBAUTHCOMMAND');
+      assert.equal(err.failureCode, 'ETERMINATE');
+      assert.equal(err.timeoutCode, 'ETIMEDOUT');
+      assert.equal(err.overflowCode, 'EOVERFLOW');
+      assert.equal(err.cause?.code, 'ETERMINATE');
+      assert.equal(err.cause?.timeoutCode, 'ETIMEDOUT');
+      assert.equal(err.cause?.overflowCode, 'EOVERFLOW');
+      assert.equal(err.cause?.cause, undefined);
+      assert.equal('stdout' in err, false);
+      assert.equal('stderr' in err, false);
+      assert.doesNotMatch(`${err.message}\n${err.cause?.message}`, new RegExp(secret, 'u'));
+      return true;
+    },
+  );
+});
+
+test('resolveGitHubAuth sanitizes a POSIX forced termination failure', {
+  timeout: 2_000,
+}, async () => {
+  const child = new EventEmitter();
+  child.pid = 4321;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  const terminationFailure = Object.assign(
+    new Error('termination detail must not escape'),
+    { code: 'ETERMINATE' },
+  );
+
+  await assert.rejects(
+    resolveGitHubAuth(
+      { hostname: 'github.com', username: 'octocat', repositories: ['owner/repo'] },
+      {
+        timeoutMs: 10,
+        runCommand: (command, args, options) => {
+          const invocation = runGitHubAuthCommand(command, args, {
+            ...options,
+            platform: 'linux',
+            hardKillGraceMs: 1,
+            spawnProcess: () => child,
+            terminate: async (_target, { force }) => {
+              if (force) throw terminationFailure;
+            },
+          });
+          setTimeout(() => child.emit('close', 0, null), 10);
+          return invocation;
+        },
+      },
+    ),
+    (err) => {
+      assert.equal(err.code, 'EGITHUBAUTHCOMMAND');
+      assert.equal(err.failureCode, 'ETERMINATE');
+      assert.equal(err.timeoutCode, 'ETIMEDOUT');
+      assert.equal(err.cause?.code, 'ETERMINATE');
+      assert.equal(err.cause?.timeoutCode, 'ETIMEDOUT');
+      assert.equal('stdout' in err, false);
+      assert.equal('stderr' in err, false);
+      assert.doesNotMatch(`${err.message}\n${err.cause?.message}`, /termination detail/u);
+      return true;
+    },
+  );
+});
+
+test('resolveGitHubAuth keeps a completed non-zero token exit as missing login', async () => {
+  await assert.rejects(
+    resolveGitHubAuth(
+      { hostname: 'github.com', username: 'octocat', repositories: ['owner/repo'] },
+      {
+        runCommand: async () => {
+          throw Object.assign(new Error('not logged in'), {
+            code: 1,
+            signal: null,
+            completedExit: true,
+            stdout: '',
+            stderr: 'not logged in',
+          });
+        },
+      },
+    ),
+    (err) => {
+      assert.equal(err.code, undefined);
+      assert.match(err.message, /no usable authentication/u);
+      return true;
+    },
+  );
+});
+
+test('GitHub auth timeout force-kills a child that ignores SIGTERM', {
+  skip: process.platform === 'win32',
+  timeout: 2_000,
+}, async () => {
+  const startedAt = Date.now();
+
+  await assert.rejects(
+    runGitHubAuthCommand(
+      process.execPath,
+      [
+        '-e',
+        'process.on("SIGTERM",()=>{});setInterval(()=>{},1000)',
+      ],
+      {
+        // A 30 ms budget races Node 24 startup on hosted macOS ARM and can
+        // reject before the forced tree kill has attached. Keep the fixture
+        // short while giving the child enough time to reach its SIGTERM
+        // handler deterministically.
+        timeoutMs: 100,
+        environment: process.env,
+        hardKillGraceMs: 100,
+      },
+    ),
+    (err) => err?.code === 'ETIMEDOUT' && err?.signal === 'SIGKILL',
+  );
+
+  assert.ok(Date.now() - startedAt < 1_000);
+});
+
+test('GitHub auth surfaces a POSIX forced tree termination failure', {
+  timeout: 2_000,
+}, async () => {
+  const child = new EventEmitter();
+  child.pid = 4321;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  const terminationFailure = Object.assign(
+    new Error('group and leader termination failed'),
+    { code: 'ETERMINATE' },
+  );
+
+  await assert.rejects(
+    runGitHubAuthCommand('gh', ['auth', 'status'], {
+      timeoutMs: 10,
+      hardKillGraceMs: 10,
+      environment: {},
+      platform: 'linux',
+      spawnProcess: () => child,
+      terminate: async (_target, { force }) => {
+        if (force) throw terminationFailure;
+      },
+    }),
+    (err) =>
+      err?.code === 'ETERMINATE' &&
+      err?.timeoutCode === 'ETIMEDOUT' &&
+      err?.cause === terminationFailure,
+  );
+});
+
+test('GitHub auth timeout keeps tree kill armed after the leader exits', {
+  timeout: 3_000,
+}, async () => {
+  // Inject the leader/descendant lifecycle instead of relying on hosted
+  // macOS process-group scheduling. The graceful stop exits the leader but
+  // intentionally leaves a descendant alive; the hard tree kill must remain
+  // armed after the leader's close event and clear that descendant before the
+  // command settles. This keeps production cleanup/error semantics unchanged
+  // while making the lifecycle assertion deterministic on Node 22 ARM.
+  const child = new EventEmitter();
+  child.pid = 4321;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  let leaderAlive = true;
+  let descendantAlive = true;
+  const terminationCalls = [];
+  const terminate = async (_target, { platform, force }) => {
+    terminationCalls.push({ platform, force, leaderAlive, descendantAlive });
+    leaderAlive = false;
+    if (force) descendantAlive = false;
+    if (!force) process.nextTick(() => child.emit('close', 0, 'SIGTERM'));
+  };
+
+  const invocation = runGitHubAuthCommand('gh', ['auth', 'status'], {
+    timeoutMs: 10,
+    environment: {},
+    platform: 'darwin',
+    spawnProcess: () => child,
+    terminate,
+    hardKillGraceMs: 10,
+  });
+
+  await assert.rejects(
+    invocation,
+    (err) => err?.code === 'ETIMEDOUT' && err?.signal === 'SIGKILL',
+  );
+  assert.deepEqual(terminationCalls, [
+    { platform: 'darwin', force: false, leaderAlive: true, descendantAlive: true },
+    { platform: 'darwin', force: true, leaderAlive: false, descendantAlive: true },
+  ]);
+  assert.equal(leaderAlive, false);
+  assert.equal(descendantAlive, false);
+});
+
+test('Windows auth timeout starts forced tree kill before the leader exits', {
+  timeout: 2_000,
+}, async () => {
+  const child = new EventEmitter();
+  child.pid = 4321;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  let leaderAlive = true;
+  let descendantAlive = true;
+  const terminationCalls = [];
+
+  const terminate = async (_child, { platform, force }) => {
+    terminationCalls.push({ platform, force, leaderAlive });
+    if (force && leaderAlive) descendantAlive = false;
+    leaderAlive = false;
+    process.nextTick(() => child.emit('close', 1, force ? 'SIGKILL' : 'SIGTERM'));
+  };
+
+  await assert.rejects(
+    runGitHubAuthCommand('gh', ['auth', 'status'], {
+      timeoutMs: 10,
+      environment: {},
+      platform: 'win32',
+      spawnProcess: () => child,
+      terminate,
+      hardKillGraceMs: 10,
+    }),
+    (err) => err?.code === 'ETIMEDOUT',
+  );
+
+  assert.deepEqual(terminationCalls, [{
+    platform: 'win32',
+    force: true,
+    leaderAlive: true,
+  }]);
+  assert.equal(descendantAlive, false);
+});
+
+test('Windows auth reports a failed forced tree termination', {
+  timeout: 2_000,
+}, async () => {
+  const child = new EventEmitter();
+  child.pid = 4321;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  const terminationFailure = Object.assign(
+    new Error('taskkill exited with status 1'),
+    { code: 'ETERMINATE' },
+  );
+
+  await assert.rejects(
+    runGitHubAuthCommand('gh', ['auth', 'status'], {
+      timeoutMs: 10,
+      environment: {},
+      platform: 'win32',
+      spawnProcess: () => child,
+      terminate: async () => {
+        throw terminationFailure;
+      },
+    }),
+    (err) =>
+      err?.code === 'ETERMINATE' &&
+      err?.timeoutCode === 'ETIMEDOUT' &&
+      err?.cause === terminationFailure,
+  );
+});
 
 test('parseAuthStatus returns every authenticated account and active state', () => {
   const output = `github.com

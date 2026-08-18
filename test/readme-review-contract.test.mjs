@@ -6,6 +6,29 @@ import { fileURLToPath } from 'node:url';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+test('README requires a fresh active request for every review candidate', async () => {
+  const readme = await readFile(path.join(projectRoot, 'README.md'), 'utf8');
+
+  assert.match(readme, /pushing another commit does not start a\s+re-review by itself/u);
+  assert.match(readme, /Locally tracked PRs are never added to the queue on their own/u);
+  assert.match(readme, /Search pagination\s+metadata and the distinct candidate count must agree/u);
+  assert.match(readme, /malformed\s+or foreign row fail the whole repository scope closed/u);
+  assert.match(readme, /Historical state and scheduling cursors are retained when a PR is\s+absent from Search/u);
+  assert.match(readme, /A requested PR that is fetched and found closed or merged is retired/u);
+  assert.match(readme, /Dry runs never change\s+state/u);
+  assert.match(readme, /revalidates the exact, case-insensitive requested-reviewer\s+login after generation and immediately before every review POST/u);
+  assert.match(readme, /Read-only reconciliation after an ambiguous or\s+successful\s+POST\s+remains allowed/u);
+  assert.match(readme, /bounded unrelated `Bot` actors ending in `\[bot\]` may coexist/u);
+  assert.match(readme, /Review records expire 365 days/u);
+  assert.match(readme, /at most\s+25 deterministic, rotating historical-maintenance operations/u);
+  assert.match(readme, /state file is limited to\s+10,000 review records and 16 MiB/u);
+  assert.match(readme, /reserves the candidate's\s+exact key, SHA, canonical timestamp, record count, and serialized UTF-8 bytes\s+before marker reconciliation, diff fetch, prompt reads, or reviewer work/u);
+  assert.match(readme, /equal soft entry and byte shares but may borrow unused global capacity/u);
+  assert.match(readme, /Current, reserved, unscoped, malformed, and\s+unproven records are never evicted/u);
+  assert.match(readme, /still-requested PR can become eligible again after its record expires/u);
+  assert.doesNotMatch(readme, /tracked fallback/iu);
+});
+
 test('README documents the constrained MCP contract for {{diff}}', async () => {
   const readme = await readFile(path.join(projectRoot, 'README.md'), 'utf8');
   const customizingReviews = readme.match(

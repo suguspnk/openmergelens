@@ -4,6 +4,53 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-08-12
+
+- Fixed review scheduling so only pull requests with a current, validated
+  GitHub review request enter the queue. Pagination metadata and candidate
+  counts must prove complete, and incomplete, capped, malformed, or foreign
+  discovery fails the repository scope closed. Polling accepts only results
+  carrying module-private validation provenance; public properties cannot forge
+  admission. Counts and pull-request numbers require canonical decimal encoding,
+  and validated candidate snapshots are immutable. Search absence never deletes
+  historical review state or scheduling cursors.
+- Revalidated the exact active user review request after review generation and
+  immediately before every review POST, including the HTTP 422 fallback, while
+  preserving read-only post reconciliation after GitHub clears the request.
+  Late confirmed closure or merge now retires only the matching account state
+  key with rollback on persistence failure.
+- Bounded review state to 10,000 records and 16 MiB, added canonical field
+  validation and safe new-key capacity reservations, and introduced exact
+  365-day expiry plus a deterministic 25-record-per-poll scoped closure sweep.
+- Hardened state reads and atomic replacement against symlink, shared-parent,
+  parent-replacement, and cleanup races. Legacy over-cap repair now applies one
+  end-to-end deadline and incrementally projects confirmed closure reclamation.
+- Classified post-rename state verification failures as indeterminate commits,
+  forcing strict reload before queued writes, and restricted partial GitHub auth
+  salvage to completed non-zero status exits. Windows path validation now rejects
+  Win32 device aliases, superscript `COM`/`LPT` forms, and trailing-dot/space names.
+- Made successful state replacement crash-durable by flushing its parent
+  directory, with explicit post-commit warning semantics, while retaining
+  existing absolute paths in owner-controlled non-writable POSIX directories.
+- Rebound the parent and committed file after the final rename, reported
+  unsupported Windows directory flushes as unconfirmed durability, and rotated
+  deadline-exhausted legacy authentication batches fairly across polls.
+- Kept byte-neutral predecessor repair persistable when pretty formatting would
+  exceed 32 MiB, bounded six-figure cursor migration without argument spreading,
+  and force-killed GitHub authentication trees that outlive their timeout or
+  leader process, starting Windows tree termination before the leader PID can
+  exit and surfacing failed `taskkill` cleanup. Windows now requires the
+  canonical default OpenMergeLens home and a direct-child state file because
+  arbitrary ACLs and reparse points cannot be verified portably through Node.
+- Accepted valid human and unrelated `[bot]` requested-reviewer actors while
+  failing malformed or mistyped actor rows closed. Hardened state canonicality,
+  future timestamps, and marker-version proof; moved exact UTF-8 entry/byte
+  reservations before diff and AI work; and added deterministic soft-share
+  compaction that never evicts current, reserved, unscoped, or unproven state.
+- Partitioned the heaviest state and poller regression files under the same
+  bounded test timeout so supported CI runners retain complete coverage without
+  cancelling slower file aggregates.
+
 ## [1.5.1] - 2026-08-10
 
 - Increased the default reviewer process timeout to 30 minutes and aligned

@@ -18,55 +18,55 @@ test('review queues are interleaved fairly without losing account context', () =
   );
 });
 
-test('requested candidates precede tracked fallbacks while account queues stay fair', () => {
+test('account queues stay fair while preserving each account order', () => {
   assert.deepEqual(
     roundRobinAccountQueues([
       {
         account: work,
         items: [
-          { id: 'w-tracked-1', source: 'tracked' },
-          { id: 'w-requested', source: 'requested' },
-          { id: 'w-tracked-2', source: 'tracked' },
+          { id: 'w-requested-1' },
+          { id: 'w-requested-2' },
+          { id: 'w-requested-3' },
         ],
       },
       {
         account: personal,
         items: [
-          { id: 'p-tracked', source: 'tracked' },
-          { id: 'p-requested', source: 'requested' },
+          { id: 'p-requested-1' },
+          { id: 'p-requested-2' },
         ],
       },
     ]).map(({ account, id }) => `${account.username}:${id}`),
     [
-      'work:w-requested',
-      'personal:p-requested',
-      'work:w-tracked-1',
-      'personal:p-tracked',
-      'work:w-tracked-2',
+      'work:w-requested-1',
+      'personal:p-requested-1',
+      'work:w-requested-2',
+      'personal:p-requested-2',
+      'work:w-requested-3',
     ],
   );
 });
 
-test('repository queues are interleaved within an account while each repository keeps requested priority', () => {
+test('repository queues are interleaved within an account while preserving repository order', () => {
   assert.deepEqual(
     roundRobinAccountQueues([
       {
         account: work,
         items: [
-          { repo: 'owner/busy', id: 'busy-tracked-1', source: 'tracked' },
-          { repo: 'owner/busy', id: 'busy-requested', source: 'requested' },
-          { repo: 'owner/busy', id: 'busy-tracked-2', source: 'tracked' },
-          { repo: 'owner/starved', id: 'starved-tracked', source: 'tracked' },
-          { repo: 'owner/starved', id: 'starved-requested', source: 'requested' },
+          { repo: 'owner/busy', id: 'busy-requested-1' },
+          { repo: 'owner/busy', id: 'busy-requested-2' },
+          { repo: 'owner/busy', id: 'busy-requested-3' },
+          { repo: 'owner/starved', id: 'starved-requested-1' },
+          { repo: 'owner/starved', id: 'starved-requested-2' },
         ],
       },
     ]).map(({ account, id }) => `${account.username}:${id}`),
     [
-      'work:busy-requested',
-      'work:starved-requested',
-      'work:busy-tracked-1',
-      'work:starved-tracked',
-      'work:busy-tracked-2',
+      'work:busy-requested-1',
+      'work:starved-requested-1',
+      'work:busy-requested-2',
+      'work:starved-requested-2',
+      'work:busy-requested-3',
     ],
   );
 });

@@ -10,6 +10,7 @@ import {
   applyScheduledEnvironment,
   readScheduledEnvironment,
 } from '../lib/scheduled-environment.mjs';
+import { createTestHome, environmentWithTestHome } from './test-home.mjs';
 
 const execFileAsync = promisify(execFile);
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -68,13 +69,14 @@ test('scheduled runner logs missing environment startup failures beside the envi
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-scheduled-missing-'));
   const environmentPath = path.join(directory, 'scheduler-environment.json');
   t.after(() => rm(directory, { recursive: true, force: true }));
+  const userHome = await createTestHome(t, 'openmergelens-scheduled-process-');
 
   await assert.rejects(
     execFileAsync(process.execPath, ['bin/scheduled.mjs', environmentPath], {
       cwd: projectRoot,
       env: {
         ...process.env,
-        OPENMERGELENS_HOME: path.join(directory, 'process-home'),
+        ...environmentWithTestHome(process.env, userHome),
       },
     }),
     (err) => {
@@ -96,6 +98,7 @@ test('scheduled runner logs malformed environment startup failures beside the en
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-scheduled-malformed-'));
   const environmentPath = path.join(directory, 'scheduler-environment.json');
   t.after(() => rm(directory, { recursive: true, force: true }));
+  const userHome = await createTestHome(t, 'openmergelens-scheduled-process-');
   await writeFile(environmentPath, '{"PATH":', 'utf8');
 
   await assert.rejects(
@@ -103,7 +106,7 @@ test('scheduled runner logs malformed environment startup failures beside the en
       cwd: projectRoot,
       env: {
         ...process.env,
-        OPENMERGELENS_HOME: path.join(directory, 'process-home'),
+        ...environmentWithTestHome(process.env, userHome),
       },
     }),
     (err) => {
@@ -125,9 +128,10 @@ test('scheduled runner consumes its environment argument before poll argument pa
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-scheduled-runner-'));
   const environmentPath = path.join(directory, 'scheduler-environment.json');
   t.after(() => rm(directory, { recursive: true, force: true }));
+  const userHome = await createTestHome(t, 'openmergelens-scheduled-process-');
   await writeFile(environmentPath, JSON.stringify({
     PATH: process.env.PATH,
-    OPENMERGELENS_HOME: directory,
+    OPENMERGELENS_HOME: userHome,
   }));
 
   await assert.rejects(
@@ -137,6 +141,7 @@ test('scheduled runner consumes its environment argument before poll argument pa
       {
         cwd: projectRoot,
         env: {
+          ...environmentWithTestHome(process.env, userHome),
           PATH: '/usr/bin:/bin',
           OPENMERGELENS_DESKTOP_NOTIFICATIONS: '0',
         },
@@ -147,7 +152,7 @@ test('scheduled runner consumes its environment argument before poll argument pa
       return true;
     },
   );
-  const record = JSON.parse(await readFile(path.join(directory, 'poll.log'), 'utf8'));
+  const record = JSON.parse(await readFile(path.join(userHome, 'poll.log'), 'utf8'));
   assert.match(record.message, /unrecognized argument "--invalid"/);
   assert.doesNotMatch(record.message, new RegExp(
     environmentPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),

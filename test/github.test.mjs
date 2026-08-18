@@ -7,6 +7,9 @@ import {
   diffAnchors,
   getPullRequest,
   getPullRequestDiff,
+  ghSpawn,
+  hasActiveReviewRequest,
+  isValidatedReviewRequestSearchResult,
   postReview,
   prepareReview,
   retryMetadataFromDiagnostic,
@@ -23,8 +26,95 @@ import {
   MAX_TIMER_DELAY_MS,
 } from '../lib/github-mutation-queue.mjs';
 import {
+  MAX_ACTIVE_REVIEW_REQUEST_USERS,
   MAX_DIFF_ANCHORS,
 } from '../lib/security-limits.mjs';
+
+function fakeGhChild() {
+  const child = new EventEmitter();
+  child.pid = 4321;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdin = {
+    write() {},
+    end() {},
+    on() {},
+  };
+  return child;
+}
+
+test('Windows gh timeout starts forced tree termination while its leader is live', {
+  timeout: 2_000,
+}, async () => {
+  const child = fakeGhChild();
+  let leaderAlive = true;
+  const calls = [];
+  const terminate = async (_child, options) => {
+    calls.push({ ...options, leaderAlive });
+    leaderAlive = false;
+    process.nextTick(() => child.emit('close', 1, 'SIGKILL'));
+  };
+
+  await assert.rejects(
+    ghSpawn(['auth', 'status'], {
+      timeoutMs: 10,
+      platform: 'win32',
+      spawnProcess: () => child,
+      terminate,
+    }),
+    (err) => err?.code === 'ETIMEDOUT',
+  );
+  assert.deepEqual(calls, [{
+    platform: 'win32',
+    force: true,
+    leaderAlive: true,
+  }]);
+});
+
+test('Windows gh timeout surfaces failed process-tree termination', {
+  timeout: 2_000,
+}, async () => {
+  const child = fakeGhChild();
+  const terminationFailure = Object.assign(new Error('taskkill failed'), {
+    code: 'ETERMINATE',
+  });
+
+  await assert.rejects(
+    ghSpawn(['auth', 'status'], {
+      timeoutMs: 10,
+      platform: 'win32',
+      spawnProcess: () => child,
+      terminate: async () => {
+        throw terminationFailure;
+      },
+    }),
+    (err) =>
+      err?.code === 'ETERMINATE' &&
+      err?.terminalCode === 'ETIMEDOUT' &&
+      err?.cause === terminationFailure,
+  );
+});
+
+function mockGhStdout(t, outputs) {
+  let callIndex = 0;
+  t.mock.method(childProcess, 'spawn', () => {
+    const output = outputs[callIndex];
+    callIndex += 1;
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = {
+      write() {},
+      end() {},
+    };
+    process.nextTick(() => {
+      if (output !== undefined) child.stdout.emit('data', Buffer.from(output));
+      child.emit('close', 0);
+    });
+    return child;
+  });
+  return () => callIndex;
+}
 
 test('any normalized review fits the posting body when all findings are unanchored', async () => {
   const normalized = normalizeReviewObject({
@@ -77,7 +167,7 @@ test('explicit repository search preserves concatenated paginated gh output', as
         Buffer.from(
           'meta|2|false\n' +
           'https://api.github.com/repos/acme/first|7\n' +
-          'https://api.github.com/repos/acme/second|8\n',
+          'https://api.github.com/repos/acme/first|8\n',
         ),
       );
       child.emit('close', 0);
@@ -91,7 +181,34 @@ test('explicit repository search preserves concatenated paginated gh output', as
   });
   assert.deepEqual(results, [
     { repo: 'acme/first', number: 7 },
-    { repo: 'acme/second', number: 8 },
+    { repo: 'acme/first', number: 8 },
+  ]);
+  assert.deepEqual(Object.getOwnPropertyDescriptor(results, 'complete'), {
+    configurable: false,
+    enumerable: false,
+    value: true,
+    writable: false,
+  });
+  assert.equal(Array.isArray(results), true);
+  assert.equal(isValidatedReviewRequestSearchResult(results), true);
+  const descriptorClone = [...results];
+  Object.defineProperty(
+    descriptorClone,
+    'complete',
+    Object.getOwnPropertyDescriptor(results, 'complete'),
+  );
+  assert.equal(isValidatedReviewRequestSearchResult(descriptorClone), false);
+  assert.equal(Object.isFrozen(results), true);
+  assert.equal(Object.isFrozen(results[0]), true);
+  assert.throws(() => {
+    results[0].repo = 'acme/other';
+  }, TypeError);
+  assert.throws(() => {
+    results.push({ repo: 'acme/first', number: 9 });
+  }, TypeError);
+  assert.deepEqual(results, [
+    { repo: 'acme/first', number: 7 },
+    { repo: 'acme/first', number: 8 },
   ]);
 
   assert.equal(command, 'gh');
@@ -102,64 +219,176 @@ test('explicit repository search preserves concatenated paginated gh output', as
   assert.ok(args.some((arg) => arg.includes('.repository_url')));
 });
 
-test('capped review-requested search falls back to the repository pull list', async (t) => {
-  const calls = [];
-  const fallbackPage = [
-    { number: 2001, requested_reviewers: [{ login: 'OCTOCAT' }] },
-    { number: 2002, requested_reviewers: [{ login: 'other-user' }] },
-  ];
-  t.mock.method(childProcess, 'spawn', (_spawnCommand, spawnArgs) => {
-    calls.push(spawnArgs);
-    const child = new EventEmitter();
-    child.stdout = new EventEmitter();
-    child.stderr = new EventEmitter();
-    child.stdin = {
-      write() {},
-      end() {},
-    };
-    process.nextTick(() => {
-      if (spawnArgs.includes('/search/issues')) {
-        child.stdout.emit(
-          'data',
-          Buffer.from(
-            'meta|1001|false\n' +
-            'https://api.github.com/repos/acme/repo|1\n',
-          ),
-        );
-      } else {
-        // gh applies --jq to each array-shaped page before returning stdout.
-        const fallbackNumbers = fallbackPage
-          .filter((pullRequest) => pullRequest.requested_reviewers.some(
-            (reviewer) => reviewer.login.toLowerCase() === 'octocat',
-          ))
-          .map((pullRequest) => String(pullRequest.number));
-        child.stdout.emit('data', Buffer.from(`${fallbackNumbers.join('\n')}\n`));
-      }
-      child.emit('close', 0);
-    });
-    return child;
-  });
+test('capped review-requested search fails closed without a fallback', async (t) => {
+  const spawnCount = mockGhStdout(t, [
+    'meta|1001|false\nhttps://api.github.com/repos/acme/repo|1\n',
+  ]);
+
+  await assert.rejects(
+    searchReviewRequestedPRs({ username: 'octocat', repo: 'acme/repo' }),
+    /did not provide a complete result set/u,
+  );
+  assert.equal(spawnCount(), 1);
+});
+
+test('complete multi-page review-requested search proves every result', async (t) => {
+  const firstPage = Array.from({ length: 100 }, (_, index) =>
+    `https://api.github.com/repos/acme/repo|${index + 1}`
+  ).join('\n');
+  const spawnCount = mockGhStdout(t, [
+    `meta|101|false\n${firstPage}\nmeta|101|false\n` +
+      'https://api.github.com/repos/acme/repo|101\n',
+  ]);
 
   const results = await searchReviewRequestedPRs({
     username: 'octocat',
     repo: 'acme/repo',
   });
 
-  assert.deepEqual(results, [
-    { repo: 'acme/repo', number: 1 },
-    { repo: 'acme/repo', number: 2001 },
+  assert.equal(results.complete, true);
+  assert.equal(results.length, 101);
+  assert.deepEqual(results.at(-1), { repo: 'acme/repo', number: 101 });
+  assert.equal(spawnCount(), 1);
+});
+
+test('empty review-requested search is completeness-proven', async (t) => {
+  mockGhStdout(t, ['meta|0|false\n']);
+
+  const results = await searchReviewRequestedPRs({
+    username: 'octocat',
+    repo: 'acme/repo',
+  });
+
+  assert.deepEqual(results, []);
+  assert.equal(results.complete, true);
+});
+
+for (const [label, encoding] of [
+  ['empty', ''],
+  ['whitespace-only', ' '],
+  ['leading whitespace', ' 1'],
+  ['trailing whitespace', '1 '],
+  ['exponent', '1e0'],
+  ['positive sign', '+1'],
+  ['negative sign', '-1'],
+  ['decimal', '1.0'],
+  ['leading zero', '01'],
+  ['unsafe integer', '9007199254740992'],
+]) {
+  test(`review-requested search rejects ${label} total_count encoding`, async (t) => {
+    mockGhStdout(t, [`meta|${encoding}|false\n`]);
+
+    await assert.rejects(
+      searchReviewRequestedPRs({ username: 'octocat', repo: 'acme/repo' }),
+      /malformed result metadata/u,
+    );
+  });
+}
+
+for (const [label, encoding] of [
+  ['empty', ''],
+  ['whitespace-only', ' '],
+  ['leading whitespace', ' 1'],
+  ['trailing whitespace', '1 '],
+  ['exponent', '1e0'],
+  ['positive sign', '+1'],
+  ['negative sign', '-1'],
+  ['decimal', '1.0'],
+  ['zero', '0'],
+  ['leading zero', '01'],
+  ['unsafe integer', '9007199254740992'],
+]) {
+  test(`review-requested search rejects ${label} PR number encoding`, async (t) => {
+    mockGhStdout(t, [
+      `meta|1|false\nhttps://api.github.com/repos/acme/repo|${encoding}\n`,
+    ]);
+
+    await assert.rejects(
+      searchReviewRequestedPRs({ username: 'octocat', repo: 'acme/repo' }),
+      /malformed pull request candidate/u,
+    );
+  });
+}
+
+for (const { label, output, error } of [
+  {
+    label: 'changing total_count metadata',
+    output:
+      'meta|2|false\n' +
+      'https://api.github.com/repos/acme/repo|7\n' +
+      'meta|1|false\n',
+    error: /inconsistent pagination metadata/u,
+  },
+  {
+    label: 'changing incomplete_results metadata',
+    output:
+      'meta|1|false\n' +
+      'https://api.github.com/repos/acme/repo|7\n' +
+      'meta|1|true\n',
+    error: /inconsistent pagination metadata/u,
+  },
+  {
+    label: 'candidate output without metadata',
+    output: 'https://api.github.com/repos/acme/repo|7\n',
+    error: /candidate without result metadata/u,
+  },
+  {
+    label: 'missing incomplete_results metadata',
+    output:
+      'meta|1|null\n' +
+      'https://api.github.com/repos/acme/repo|7\n',
+    error: /malformed result metadata/u,
+  },
+  {
+    label: 'foreign repository candidates',
+    output:
+      'meta|1|false\n' +
+      'https://api.github.com/repos/acme/other|7\n',
+    error: /foreign pull request candidate/u,
+  },
+  {
+    label: 'duplicate candidates',
+    output:
+      'meta|2|false\n' +
+      'https://api.github.com/repos/acme/repo|7\n' +
+      'https://api.github.com/repos/ACME/REPO|7\n',
+    error: /duplicate pull request candidate/u,
+  },
+  {
+    label: 'candidate-count mismatch',
+    output:
+      'meta|2|false\n' +
+      'https://api.github.com/repos/acme/repo|7\n',
+    error: /candidate count did not match result metadata/u,
+  },
+  {
+    label: 'missing page metadata',
+    output: `meta|101|false\n${Array.from({ length: 101 }, (_, index) =>
+      `https://api.github.com/repos/acme/repo|${index + 1}`
+    ).join('\n')}\n`,
+    error: /incomplete pagination metadata/u,
+  },
+]) {
+  test(`review-requested search rejects ${label}`, async (t) => {
+    mockGhStdout(t, [output]);
+
+    await assert.rejects(
+      searchReviewRequestedPRs({ username: 'octocat', repo: 'acme/repo' }),
+      error,
+    );
+  });
+}
+
+test('incomplete search metadata fails closed without a fallback', async (t) => {
+  const spawnCount = mockGhStdout(t, [
+    'meta|2|true\nhttps://api.github.com/repos/acme/repo|7\n',
   ]);
-  assert.equal(calls.length, 2);
-  assert.ok(calls[1].includes('--paginate'));
-  assert.ok(calls[1].includes('--method'));
-  assert.ok(calls[1].includes('GET'));
-  assert.ok(calls[1].includes('/repos/acme/repo/pulls'));
-  assert.ok(calls[1].includes('state=open'));
-  const fallbackJq = calls[1][calls[1].indexOf('--jq') + 1];
-  assert.equal(
-    fallbackJq,
-    '.[] | select(any(.requested_reviewers[]?; (.login // "") | ascii_downcase == "octocat")) | (.number | tostring)',
+
+  await assert.rejects(
+    searchReviewRequestedPRs({ username: 'octocat', repo: 'acme/repo' }),
+    /did not provide a complete result set/u,
   );
+  assert.equal(spawnCount(), 1);
 });
 
 test('pull request metadata includes the current state', async (t) => {
@@ -195,6 +424,139 @@ test('pull request metadata includes the current state', async (t) => {
   assert.equal(pullRequest.state, 'OPEN');
   const fields = args[args.indexOf('--json') + 1].split(',');
   assert.ok(fields.includes('state'));
+});
+
+test('active review-request lookup matches an exact login case-insensitively', async () => {
+  let requestedArgs;
+  const active = await hasActiveReviewRequest({
+    repo: 'Owner/Repo',
+    number: 7,
+    username: 'OctoCat',
+    auth: { hostname: 'github.com', username: 'octocat', token: 'token' },
+    request: async (args) => {
+      requestedArgs = args;
+      return [
+        JSON.stringify({ login: 'someone-else', type: 'User' }),
+        JSON.stringify({ login: 'dependabot[bot]', type: 'Bot' }),
+        JSON.stringify({ login: 'octocat', type: 'User' }),
+      ].join('\n');
+    },
+  });
+
+  assert.equal(active, true);
+  assert.ok(requestedArgs.includes('/repos/Owner/Repo/pulls/7/requested_reviewers'));
+  assert.ok(requestedArgs.includes('--paginate'));
+  assert.equal(
+    await hasActiveReviewRequest({
+      repo: 'owner/repo',
+      number: 7,
+      username: 'octocat',
+      request: async () => JSON.stringify({ login: 'octocat-team', type: 'User' }),
+    }),
+    false,
+  );
+});
+
+for (const [label, output] of [
+  ['missing login', '{}'],
+  ['non-string login', JSON.stringify({ login: 7, type: 'User' })],
+  ['non-object user', 'null'],
+  ['whitespace-padded login', JSON.stringify({ login: ' octocat ', type: 'User' })],
+  ['invalid login', JSON.stringify({ login: 'octo.cat', type: 'User' })],
+  ['missing type', JSON.stringify({ login: 'octocat' })],
+  ['unknown type', JSON.stringify({ login: 'octocat', type: 'Organization' })],
+  ['human-shaped bot', JSON.stringify({ login: 'octocat', type: 'Bot' })],
+  ['bot-shaped user', JSON.stringify({ login: 'dependabot[bot]', type: 'User' })],
+  ['unknown field', JSON.stringify({ login: 'octocat', type: 'User', id: 7 })],
+  ['invalid JSON', '{'],
+]) {
+  test(`active review-request lookup rejects ${label}`, async () => {
+    await assert.rejects(
+      hasActiveReviewRequest({
+        repo: 'owner/repo',
+        number: 7,
+        username: 'octocat',
+        request: async () => output,
+      }),
+      /requested reviewers response is malformed/u,
+    );
+  });
+}
+
+test('active review-request lookup rejects oversized user lists and API failures', async () => {
+  const oversized = Array.from(
+    { length: MAX_ACTIVE_REVIEW_REQUEST_USERS + 1 },
+    (_, index) => JSON.stringify({ login: `user-${index}`, type: 'User' }),
+  ).join('\n');
+  await assert.rejects(
+    hasActiveReviewRequest({
+      repo: 'owner/repo',
+      number: 7,
+      username: 'octocat',
+      request: async () => oversized,
+    }),
+    /exceeded 1000 users/u,
+  );
+  await assert.rejects(
+    hasActiveReviewRequest({
+      repo: 'owner/repo',
+      number: 7,
+      username: 'octocat',
+      request: async () => { throw new Error('HTTP 503'); },
+    }),
+    /HTTP 503/u,
+  );
+});
+
+test('active review-request lookup validates every returned user after a match', async () => {
+  await assert.rejects(
+    hasActiveReviewRequest({
+      repo: 'owner/repo',
+      number: 7,
+      username: 'octocat',
+      request: async () => [
+        JSON.stringify({ login: 'octocat', type: 'User' }),
+        JSON.stringify({ login: 7, type: 'User' }),
+      ].join('\n'),
+    }),
+    /requested reviewers response is malformed/u,
+  );
+});
+
+test('active review-request lookup permits bounded unrelated bots but never configured bots', async () => {
+  assert.equal(
+    await hasActiveReviewRequest({
+      repo: 'owner/repo',
+      number: 7,
+      username: 'octocat',
+      request: async () => [
+        JSON.stringify({ login: 'dependabot[bot]', type: 'Bot' }),
+        JSON.stringify({ login: 'OctoCat', type: 'User' }),
+      ].join('\n'),
+    }),
+    true,
+  );
+  await assert.rejects(
+    hasActiveReviewRequest({
+      repo: 'owner/repo',
+      number: 7,
+      username: 'dependabot[bot]',
+      request: async () => JSON.stringify({
+        login: 'dependabot[bot]',
+        type: 'Bot',
+      }),
+    }),
+    /requested-reviewer username is invalid/u,
+  );
+  await assert.rejects(
+    hasActiveReviewRequest({
+      repo: 'owner/repo',
+      number: 7,
+      username: ' octocat ',
+      request: async () => '',
+    }),
+    /requested-reviewer username is invalid/u,
+  );
 });
 
 test('gh subprocess preserves signal termination metadata', async (t) => {
@@ -346,7 +708,7 @@ test('postReview requires mutation scheduling at its GitHub write boundary', asy
   );
 });
 
-for (const reason of ['stale', 'closed']) {
+for (const reason of ['stale', 'closed', 'revoked']) {
   test(`postReview rethrows a ${reason} mutation-boundary sentinel before reconciliation`, async () => {
     const calls = [];
     const options = reviewOptions({
@@ -542,6 +904,57 @@ test('reviewAlreadyPosted rejects a forged marker from a different reviewer', as
   assert.equal(await reviewAlreadyPosted({ ...options, request }), false);
 });
 
+test('reviewAlreadyPosted ignores nullable unrelated rows around an exact marker match', async () => {
+  const options = reviewOptions();
+  assert.equal(
+    await reviewAlreadyPosted({
+      ...options,
+      request: async () => [
+        JSON.stringify({
+          body: null,
+          commit_id: null,
+          state: 'PENDING',
+          user_login: null,
+        }),
+        JSON.stringify({
+          body: options.marker,
+          commit_id: options.commitId,
+          state: 'COMMENTED',
+          user_login: options.auth.username,
+        }),
+        JSON.stringify({
+          body: null,
+          commit_id: null,
+          state: 'DISMISSED',
+          user_login: null,
+        }),
+      ].join('\n'),
+    }),
+    true,
+  );
+});
+
+test('reviewAlreadyPosted still rejects invalid row schema after a match', async () => {
+  const options = reviewOptions();
+  await assert.rejects(reviewAlreadyPosted({
+    ...options,
+    request: async () => [
+      JSON.stringify({
+        body: options.marker,
+        commit_id: options.commitId,
+        state: 'COMMENTED',
+        user_login: options.auth.username,
+      }),
+      JSON.stringify({
+        body: null,
+        commit_id: null,
+        state: 'UNKNOWN',
+        user_login: null,
+      }),
+    ].join('\n'),
+  }), /review reconciliation response is malformed/u);
+});
+
 test('postReview does not retry a non-validation failure', async () => {
   const calls = [];
   const request = async (args) => {
@@ -653,7 +1066,7 @@ test('postReview fallback stops without reconciliation when GitHub rate-limits i
 test('postReview treats an ambiguously successful request as complete after reconciliation', async () => {
   const options = reviewOptions();
   const calls = [];
-  let scheduledMutations = 0;
+  const scheduledOperations = [];
   let submitted;
   const request = async (args, requestOptions) => {
     const method = args[args.indexOf('--method') + 1];
@@ -673,13 +1086,16 @@ test('postReview treats an ambiguously successful request as complete after reco
   await postReview({
     ...options,
     request,
-    scheduleMutation: async (operation) => {
-      scheduledMutations += 1;
+    scheduleMutation: async (operation, options) => {
+      scheduledOperations.push(options);
       return operation();
     },
   });
   assert.deepEqual(calls, ['POST', 'GET']);
-  assert.equal(scheduledMutations, 2);
+  assert.deepEqual(scheduledOperations, [
+    { mutation: true },
+    { mutation: false },
+  ]);
   assert.match(submitted.body, new RegExp(options.marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(
     submitted.body,
@@ -690,6 +1106,7 @@ test('postReview treats an ambiguously successful request as complete after reco
 test('postReview retries without inline comments only for an unreconciled 422', async () => {
   const calls = [];
   const payloads = [];
+  const scheduledOperations = [];
   const request = async (args, requestOptions) => {
     const method = args[args.indexOf('--method') + 1];
     calls.push(method);
@@ -701,9 +1118,21 @@ test('postReview retries without inline comments only for an unreconciled 422', 
     return '{}';
   };
 
-  await postReview({ ...reviewOptions(), request });
+  await postReview({
+    ...reviewOptions(),
+    request,
+    scheduleMutation: async (operation, options) => {
+      scheduledOperations.push(options);
+      return operation();
+    },
+  });
 
   assert.deepEqual(calls, ['POST', 'GET', 'POST']);
+  assert.deepEqual(scheduledOperations, [
+    { mutation: true },
+    { mutation: false },
+    { mutation: true },
+  ]);
   assert.equal(payloads[0].comments.length, 1);
   assert.deepEqual(payloads[1].comments, []);
   assert.match(payloads[1].body, /All findings/);

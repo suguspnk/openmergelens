@@ -30,7 +30,41 @@ test('PRD config shape remains valid for the current validator', async () => {
   assert.match(prd, /matching `CODEOWNERS` rule/u);
   assert.match(prd, /new commits alone are not a trigger/u);
   assert.match(prd, /State is keyed by reviewer account \+ PR \+ last-reviewed/u);
-  assert.match(prd, /request\s+that account again in GitHub's \*\*Reviewers\*\*/u);
+  assert.match(prd, /request that account again in GitHub's\s+\*\*Reviewers\*\*/u);
+  assert.match(prd, /Validated search results are the only source of\s+review candidates/u);
+  assert.match(prd, /stable pagination metadata plus\s+distinct candidate and page counts/u);
+  assert.match(prd, /incomplete or capped results,[\s\S]*?fail\s+the complete account\/repository scope closed/u);
+  assert.match(prd, /absent from a page are never authoritative evidence for deleting review state\s+or scheduling cursors/u);
+  assert.match(prd, /Revalidate that the\s+exact configured user login is still in GitHub's requested-reviewer list/u);
+  assert.match(prd, /Immediately\s+before every POST, including the HTTP 422 summary-only fallback/u);
+  assert.match(prd, /Read-only reconciliation is not a POST mutation and remains permitted/u);
+  assert.doesNotMatch(prd, /tracked(?:-state)? fallback/iu);
+});
+
+test('PRD documents bounded compatible review-state retention', async () => {
+  const prd = await readText(path.join(projectRoot, 'PRD.md'));
+
+  assert.match(prd, /Review records expire locally after exactly 365 days/u);
+  assert.match(prd, /at most 25\s+remote operations between exact marker proof and direct closure checks/u);
+  assert.match(prd, /selected,\s+authenticated,\s+configured\s+account\/repository scopes/u);
+  assert.match(prd, /search absence, lookup failure,\s+malformed metadata, HTTP 404, and `OPEN` all retain state/u);
+  assert.match(prd, /`reviewStateGcAfterKey` cursor/u);
+  assert.match(
+    prd,
+    /keeps version 1 metadata\s+readable by earlier strict readers/u,
+  );
+  assert.match(prd, /converts their last position\s+to the byte-neutral entry order/u);
+  assert.match(prd, /ordinarily read with a 16 MiB pre-parse bound and can contain at\s+most 10,000/u);
+  assert.match(prd, /predecessor-capacity migration may\s+read at most 32 MiB/u);
+  assert.match(prd, /Each repair lookup is capped at five seconds,[\s\S]*?three failed or malformed responses stop/u);
+  assert.match(prd, /requires a non-symlink parent directory owned by the\s+current user and not group\/other-writable on POSIX/u);
+  assert.match(prd, /existing absolute\s+state paths under conventional owner-controlled `0755` directories compatible/u);
+  assert.match(prd, /parent-directory flush failure is explicitly post-commit/u);
+  assert.match(prd, /reserve the candidate's\s+exact final key, SHA, timestamp, entry count, and bytes before marker\s+reconciliation, diff fetch, prompt reads, or AI/u);
+  assert.match(prd, /equal soft entry and byte shares and can borrow unused\s+global space/u);
+  assert.match(prd, /never evicts the current key, an active reservation, unscoped\/invalid state, or\s+a record without exact marker proof/u);
+  assert.match(prd, /reviewMarkerVersion: 1/u);
+  assert.match(prd, /still-requested PR can become\s+eligible\s+again after expiry/u);
 });
 
 test('project instructions describe the requested-review re-review trigger', async () => {
@@ -168,7 +202,7 @@ test('PRD discovery command matches the explicit paginated GitHub search contrac
     /1\. \*\*Discover candidate PRs\.\*[\s\S]*?```bash\s*([\s\S]*?)\s*```/u,
   );
   const searchImplementation = github.match(
-    /export async function searchReviewRequestedPRs\([\s\S]*?(?=\nexport async function getPullRequest\()/u,
+    /export async function searchReviewRequestedPRs\([\s\S]*?(?=\nexport async function hasActiveReviewRequest\()/u,
   );
 
   assert.ok(discovery, 'PRD must include the discovery command');
@@ -190,11 +224,13 @@ test('PRD discovery command matches the explicit paginated GitHub search contrac
 
   assert.match(implementation, /'api', '--paginate', '--method', 'GET', '\/search\/issues'/u);
   assert.match(implementation, /review-requested:\$\{normalizedUsername\} repo:\$\{normalizedRepo\}/u);
-  assert.match(implementation, /'-f', 'per_page=100'/u);
+  assert.match(implementation, /'-f', `per_page=\$\{GITHUB_SEARCH_PAGE_SIZE\}`/u);
   assert.match(
     implementation,
     /'--jq',[\s\S]*?\.total_count[\s\S]*?\.incomplete_results[\s\S]*?\.items\[\][\s\S]*?\.repository_url/u,
   );
-  assert.match(implementation, /\/repos\/\$\{normalizedRepo\}\/pulls/u);
-  assert.match(implementation, /requested_reviewers/u);
+  assert.doesNotMatch(implementation, /\/pulls/u);
+  assert.match(implementation, /did not provide a complete result set/u);
+  assert.match(implementation, /candidate count did not match result metadata/u);
+  assert.match(implementation, /inconsistent pagination metadata/u);
 });

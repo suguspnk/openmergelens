@@ -2,24 +2,23 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createTestHome, environmentWithTestHome } from './test-home.mjs';
 
 const execFileAsync = promisify(execFile);
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 test('fatal poll startup errors are persisted to poll.log', async (t) => {
-  const userHome = await mkdtemp(path.join(tmpdir(), 'openmergelens-bin-poll-'));
-  t.after(() => rm(userHome, { recursive: true, force: true }));
+  const userHome = await createTestHome(t, 'openmergelens-bin-poll-');
 
   await assert.rejects(
     execFileAsync(process.execPath, ['bin/poll.mjs', '--invalid'], {
       cwd: projectRoot,
       env: {
         ...process.env,
-        OPENMERGELENS_HOME: userHome,
+        ...environmentWithTestHome(process.env, userHome),
         OPENMERGELENS_DESKTOP_NOTIFICATIONS: '0',
       },
     }),
@@ -34,15 +33,14 @@ test('fatal poll startup errors are persisted to poll.log', async (t) => {
 });
 
 test('public CLI parse errors are persisted as one structured startup failure', async (t) => {
-  const userHome = await mkdtemp(path.join(tmpdir(), 'openmergelens-bin-entrypoint-'));
-  t.after(() => rm(userHome, { recursive: true, force: true }));
+  const userHome = await createTestHome(t, 'openmergelens-bin-entrypoint-');
 
   await assert.rejects(
     execFileAsync(process.execPath, ['bin/openmergelens.mjs', '--invalid'], {
       cwd: projectRoot,
       env: {
         ...process.env,
-        OPENMERGELENS_HOME: userHome,
+        ...environmentWithTestHome(process.env, userHome),
       },
     }),
     (error) => {
@@ -62,15 +60,14 @@ test('public CLI parse errors are persisted as one structured startup failure', 
 });
 
 test('public CLI parse errors release the log coordination marker', async (t) => {
-  const userHome = await mkdtemp(path.join(tmpdir(), 'openmergelens-bin-entrypoint-lock-'));
-  t.after(() => rm(userHome, { recursive: true, force: true }));
+  const userHome = await createTestHome(t, 'openmergelens-bin-entrypoint-lock-');
 
   await assert.rejects(
     execFileAsync(process.execPath, ['bin/openmergelens.mjs', '--bad'], {
       cwd: projectRoot,
       env: {
         ...process.env,
-        OPENMERGELENS_HOME: userHome,
+        ...environmentWithTestHome(process.env, userHome),
       },
     }),
     (error) => {
@@ -83,8 +80,7 @@ test('public CLI parse errors release the log coordination marker', async (t) =>
 });
 
 test('public CLI parse errors redact token-shaped arguments on stderr', async (t) => {
-  const userHome = await mkdtemp(path.join(tmpdir(), 'openmergelens-bin-entrypoint-secret-'));
-  t.after(() => rm(userHome, { recursive: true, force: true }));
+  const userHome = await createTestHome(t, 'openmergelens-bin-entrypoint-secret-');
   const token = 'ghp_TOKEN_SHAPED_INVALID_VALUE_1234567890';
 
   await assert.rejects(
@@ -92,7 +88,7 @@ test('public CLI parse errors redact token-shaped arguments on stderr', async (t
       cwd: projectRoot,
       env: {
         ...process.env,
-        OPENMERGELENS_HOME: userHome,
+        ...environmentWithTestHome(process.env, userHome),
       },
     }),
     (error) => {
@@ -112,15 +108,14 @@ test('public CLI parse errors redact token-shaped arguments on stderr', async (t
 
 test('public CLI parse errors bound oversized arguments on stderr', async (t) => {
   const invalidArgument = 'invalid-argument-'.repeat(1_000);
-  const userHome = await mkdtemp(path.join(tmpdir(), 'openmergelens-bin-entrypoint-bound-'));
-  t.after(() => rm(userHome, { recursive: true, force: true }));
+  const userHome = await createTestHome(t, 'openmergelens-bin-entrypoint-bound-');
 
   await assert.rejects(
     execFileAsync(process.execPath, ['bin/openmergelens.mjs', invalidArgument], {
       cwd: projectRoot,
       env: {
         ...process.env,
-        OPENMERGELENS_HOME: userHome,
+        ...environmentWithTestHome(process.env, userHome),
       },
     }),
     (error) => {

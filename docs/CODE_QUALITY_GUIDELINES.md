@@ -47,6 +47,13 @@ Applies to all code in this repo: `bin/`, `lib/`, and `test/`.
   ambiguous failures or missing local state must be reconciled against the
   submitted-review list before another POST is attempted. The summary-only
   fallback is limited to confirmed HTTP 422 validation failures.
+- **Authorization is a mutation-boundary invariant.** Candidate discovery is
+  not durable permission to post. After generation and immediately before
+  every review POST (including a 422 fallback), require an open PR, the expected
+  head, and the exact configured login in the active requested-reviewer list.
+  Revocation is an expected no-post result; malformed or failed authorization
+  lookup fails closed. Read-only reconciliation remains allowed after a POST
+  clears the request.
 - **On reviewer-CLI failure or empty/malformed output: skip posting, leave
   state untouched.** This is a load-bearing invariant (see PRD.md). Never
   post a broken or empty review or advance `state.json`'s
@@ -245,11 +252,24 @@ for the general pattern; these are the OpenMergeLens-specific rules.
 - **Where performance does matter, it's about not doing unnecessary network
   round-trips**, not CPU: use `--jq`/`--json` filtering server-side (via
   `gh api`) rather than fetching more than needed and filtering in Node;
-  use `--paginate` correctly rather than looping manual page-fetch calls;
-  don't re-fetch a PR's diff or metadata more than once per poll cycle for
-  the same PR.
+  use `--paginate` correctly rather than looping manual page-fetch calls.
+  Re-fetch metadata only for explicit safety boundaries: post-generation
+  confirmation, immediately-before-POST authorization, and the bounded
+  historical-state sweep. Never reuse an earlier read to authorize a later
+  mutation.
 - **Avoid unbounded work driven by external input.** A single PR's diff
   size, or the number of PRs a poll cycle finds, is attacker/environment
   influenced in the loose sense of a very large or very active repo. Keep
   per-call `maxBuffer`/timeout settings in place rather than assuming
   inputs stay small.
+- **Bound local state as well as network work.** Keep `state.json` within 16
+  MiB and 10,000 review records, validate bounded canonical fields before use,
+  reject timestamps over five minutes in the future, expire records after 365
+  days, and spend at most 25 historical closure/marker-proof operations per
+  poll. Only direct `CLOSED`/`MERGED` metadata may retire a closed scoped key;
+  absence, failure, malformed data, and 404 retain it. Before reconciliation,
+  diff fetch, or reviewer work, reserve the exact candidate record's entry and
+  serialized UTF-8 bytes. Capacity reclaim must honor dimension-specific fair
+  scope floors and may delete only exact marker-proven version-1 records, never
+  current, reserved, unscoped, invalid, or unproven state. Serialize admission
+  with state writes and roll back every in-memory batch if its atomic save fails.
