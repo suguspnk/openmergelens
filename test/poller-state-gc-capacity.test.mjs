@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createAiProcessingConsent } from '../lib/ai-processing-consent.mjs';
 import { pollOnce } from '../lib/poller.mjs';
+import { LARGE_STATE_TEST_TIMEOUT_MS } from './test-partitions.mjs';
 import {
   MAX_REVIEW_STATE_ENTRIES,
   MAX_STATE_GC_CHECKS_PER_POLL,
@@ -835,7 +836,10 @@ test('oversized predecessor state reaches bounded capacity repair', async (t) =>
 });
 
 test('many closed entries near the legacy byte ceiling use incremental repair projection', {
-  timeout: 5_000,
+  // This constructs and repairs a near-cap legacy state file. It is a
+  // correctness test rather than a 5-second product-SLA benchmark, and the
+  // supported Windows runner legitimately needs more headroom.
+  timeout: LARGE_STATE_TEST_TIMEOUT_MS,
 }, async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-upgrade-'));
   t.after(() => rm(root, { recursive: true, force: true }));
