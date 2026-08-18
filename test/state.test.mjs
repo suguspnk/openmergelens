@@ -67,10 +67,14 @@ function windowsTestStats(stats) {
     ? stats.dev <= 0n
     : typeof stats?.dev === 'number' &&
       (!Number.isSafeInteger(stats.dev) || stats.dev <= 0);
+  const inoAvailable = typeof stats?.ino === 'bigint'
+    ? stats.ino > 0n
+    : typeof stats?.ino === 'number' &&
+      Number.isSafeInteger(stats.ino) &&
+      stats.ino > 0;
   if (process.platform !== 'win32' ||
       !devUnavailable ||
-      typeof stats?.ino !== 'bigint' ||
-      stats.ino <= 0n) {
+      !inoAvailable) {
     return stats;
   }
   const normalized = Object.assign(
@@ -119,8 +123,13 @@ function runWindowsSaveChild(stateFile) {
         ? stats.dev <= 0n
         : typeof stats.dev === 'number' &&
           (!Number.isSafeInteger(stats.dev) || stats.dev <= 0);
+      const inoAvailable = typeof stats.ino === 'bigint'
+        ? stats.ino > 0n
+        : typeof stats.ino === 'number' &&
+          Number.isSafeInteger(stats.ino) &&
+          stats.ino > 0;
       if (!devUnavailable ||
-          typeof stats.ino !== 'bigint' || stats.ino <= 0n) return stats;
+          !inoAvailable) return stats;
       const normalized = Object.assign(
         Object.create(Object.getPrototypeOf(stats)),
         stats,
@@ -446,7 +455,7 @@ test('Windows file identity round-trips handles and rejects a replacement', {
   );
 });
 
-test('Windows simulated save/load accepts mixed handle and pathname stat types', async (t) => {
+test('Windows simulated save/load accepts mixed handle and pathname stat types with zero volume', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-mixed-stats-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   if (process.platform === 'win32') {
@@ -465,8 +474,9 @@ test('Windows simulated save/load accepts mixed handle and pathname stat types',
   };
 
   // Model a Windows hosted runner whose descriptor stats use bigint fields
-  // while lstat() returns safe numeric fields. Win32-shaped ancestor paths are
-  // synthetic because this regression runs on a POSIX host.
+  // while lstat() returns safe numeric fields, including the zero volume
+  // reported by Node 22 on some hosted Windows filesystems. Win32-shaped
+  // ancestor paths are synthetic because this regression runs on a POSIX host.
   const mixedLstat = async (candidate, options) => {
     if (typeof candidate === 'string' && candidate.startsWith('\\')) {
       return {
@@ -480,7 +490,7 @@ test('Windows simulated save/load accepts mixed handle and pathname stat types',
       Object.create(Object.getPrototypeOf(stats)),
       stats,
     );
-    mixed.dev = Number(stats.dev);
+    mixed.dev = process.platform === 'win32' ? 0 : Number(stats.dev);
     mixed.ino = Number(stats.ino);
     return mixed;
   };
