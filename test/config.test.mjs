@@ -8,6 +8,7 @@ import {
   accountKey,
   accountLabel,
   loadConfig,
+  normalizeBitbucketRepository,
   parseAccountSelector,
   saveConfig,
   validateConfig,
@@ -33,6 +34,26 @@ import {
 } from '../lib/ai-processing-consent.mjs';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+test('Bitbucket workspace validation allows Cloud’s 62-character limit without broadening GitHub owners', () => {
+  const workspace = `a${'b'.repeat(61)}`;
+  assert.equal(
+    normalizeBitbucketRepository(`${workspace}/repo`),
+    `${workspace}/repo`,
+  );
+  assert.throws(
+    () => validateConfig({
+      configVersion: 6,
+      githubAccounts: [{
+        hostname: 'github.com', username: 'reviewer', repositories: [`${workspace}/repo`],
+      }],
+      bitbucketAccounts: [],
+      aiProcessingConsent: createAiProcessingConsent('codex exec', []),
+      reviewerCommand: 'codex exec',
+    }),
+    /GitHub repository/u,
+  );
+});
 
 const validAccounts = [
   {
