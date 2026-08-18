@@ -215,23 +215,24 @@ test('file identity requires exact bigint dev and ino values', () => {
     ),
     false,
   );
-  assert.equal(
-    samePathIdentity(
+  assert.throws(
+    () => samePathIdentity(
       identityStats({ dev: 0, ino: 22 }),
       identityStats({ dev: 99, ino: 22 }),
       { platform: 'win32' },
     ),
-    false,
+    /identity is unsupported on this Windows filesystem/u,
   );
-  assert.equal(
-    samePathIdentity(
+  assert.throws(
+    () => samePathIdentity(
       identityStats({ dev: 0, ino: 22 }),
       identityStats({ dev: 0, ino: 22 }),
       { platform: 'win32' },
     ),
-    true,
+    /identity is unsupported on this Windows filesystem/u,
   );
   for (const invalid of [
+    { dev: 0, ino: 22 },
     { dev: 11, ino: 0 },
     { dev: Number.MAX_SAFE_INTEGER + 1, ino: 22 },
     { dev: 11, ino: Number.MAX_SAFE_INTEGER + 1 },
@@ -1741,7 +1742,8 @@ for (const guardFailure of [
         failed = true;
         throw new Error('guard identity failure');
       }
-      if (typeof args[0] === 'string' && args[0].includes('\\')) {
+      if (process.platform !== 'win32' &&
+          typeof args[0] === 'string' && args[0].includes('\\')) {
         return lstat(directory, args[1]);
       }
       return lstat(...args);
@@ -2157,7 +2159,8 @@ for (const failure of [
           // Windows ancestor walk normalizes them to backslashes; keep that
           // synthetic walk on the same verified directory rather than asking
           // the POSIX filesystem for a literal backslash path.
-          if (typeof args[0] === 'string' && args[0].includes('\\')) {
+          if (process.platform !== 'win32' &&
+              typeof args[0] === 'string' && args[0].includes('\\')) {
             return lstat(directory, args[1]);
           }
           return lstat(...args);
@@ -2797,11 +2800,12 @@ test('Windows state rejects a rechecked parent on another volume with the same f
   let parentLstatCalls = 0;
   let commitCalled = false;
   // On real Windows the reparse-ancestor walk lstat's the parent once during
-  // each verification, so the direct identity recheck is the fourth parent
-  // lstat. POSIX-hosted simulations have no walk and recheck on the second.
+  // each verification. The initial parent proof also performs one walk, so
+  // the direct identity recheck is the fifth parent lstat on Windows. POSIX-
+  // hosted simulations have no walk and recheck on the second.
   const identityRecheckCall = process.platform === 'win32' &&
     path.win32.isAbsolute(directory)
-    ? 4
+    ? 5
     : 2;
   const injectedLstat = async (candidate, options) => {
     // The simulated Windows ancestor walk asks lstat() with Win32-shaped
