@@ -4,6 +4,14 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-08-19
+
+- Added Bitbucket Cloud account configuration, credential resolution, pull
+  request polling, diff review, and inline comment posting. GitHub support
+  remains isolated from provider-specific credentials and review state, while
+  Bitbucket polling applies bounded retries, rate-limit handling, pagination,
+  prompt-size limits, and state-retention safeguards.
+
 ## [1.5.2] - 2026-08-12
 
 - Fixed review scheduling so only pull requests with a current, validated
