@@ -375,6 +375,11 @@ overrides must be relocated there before upgrading. Windows device aliases,
 including superscript `COM`/`LPT` forms, alternate streams, and names ending in
 a dot or space are rejected before path resolution. State bytes and the parent
 directory are flushed around atomic rename.
+When a supported Windows Node runtime reports an unavailable pathname volume
+field but a positive file index, the verified canonical volume root from
+`realpath` is used only for the path-to-path proof; mixed
+available/unavailable identity observations and missing canonical roots still
+fail closed.
 On Windows, retained-temporary capacity reservations use a parent-scoped
 guard before inspecting or creating the retention marker, so stale-marker
 reclamation cannot race another OpenMergeLens contender. A guard whose owner

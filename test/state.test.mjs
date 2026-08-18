@@ -310,6 +310,34 @@ test('file identity requires exact bigint dev and ino values', () => {
     ),
     /identity is unsupported on this Windows filesystem/u,
   );
+  assert.equal(
+    samePathIdentity(
+      identityStats({ dev: 0, ino: 22 }),
+      identityStats({ dev: 0, ino: 22 }),
+      { platform: 'win32', canonicalVolume: 'C:\\' },
+    ),
+    true,
+  );
+  assert.throws(
+    () => samePathIdentity(
+      identityStats({ dev: 0, ino: 22 }),
+      identityStats({ dev: 1, ino: 22 }),
+      { platform: 'win32', canonicalVolume: 'C:\\' },
+    ),
+    /identity is unsupported on this Windows filesystem/u,
+  );
+  assert.equal(
+    samePathIdentity(
+      identityStats({ dev: 0, ino: 22 }),
+      identityStats({ dev: 0, ino: 22 }),
+      {
+        platform: 'win32',
+        leftCanonicalVolume: 'C:\\',
+        rightCanonicalVolume: 'D:\\',
+      },
+    ),
+    false,
+  );
   for (const invalid of [
     { dev: 0, ino: 22 },
     { dev: 11, ino: 0 },
@@ -382,7 +410,11 @@ test('Windows state save and load fail closed when handle/path volumes differ', 
           isSymbolicLink: () => false,
         };
       }
-      const stats = await lstat(candidate, options);
+      // Normalize the baseline before the injected volume mutation. On the
+      // hosted Windows Node 22 runner pathname Stats may report dev=0; if the
+      // outer seam normalized only after this mutation, 0 -> 1 would collapse
+      // back to the same synthetic volume and stop proving rejection.
+      const stats = windowsTestStats(await lstat(candidate, options));
       if (candidate !== target) return stats;
       // A Windows file index is volume-scoped. Make the two independent path
       // observations disagree so the path-to-path proof rejects a replacement;
@@ -407,7 +439,7 @@ test('Windows state save and load fail closed when handle/path volumes differ', 
       realpath: async (parentPath) => parentPath,
       lstat: makeInjectedLstat(directory),
     }),
-    /identity is unsupported on this Windows filesystem|parent directory identity changed/u,
+    /parent directory identity changed/u,
   );
   await assert.rejects(stat(stateFile), { code: 'ENOENT' });
 
@@ -419,7 +451,7 @@ test('Windows state save and load fail closed when handle/path volumes differ', 
       lstat: makeInjectedLstat(stateFile),
       hardenPermissions: false,
     }),
-    /identity is unsupported on this Windows filesystem|review state file identity changed/u,
+    /review state file identity changed/u,
   );
 });
 
@@ -485,12 +517,12 @@ test('Windows simulated save/load accepts mixed handle and pathname stat types w
         isSymbolicLink: () => false,
       };
     }
-    const stats = await lstat(candidate, options);
+    const stats = windowsTestStats(await lstat(candidate, options));
     const mixed = Object.assign(
       Object.create(Object.getPrototypeOf(stats)),
       stats,
     );
-    mixed.dev = process.platform === 'win32' ? 0 : Number(stats.dev);
+    mixed.dev = 0;
     mixed.ino = Number(stats.ino);
     return mixed;
   };
@@ -1159,7 +1191,7 @@ test('parent replacement while loading fails closed instead of returning empty s
         await writeFile(stateFile, '{"replacement":true}\n', { mode: 0o600 });
       },
     }),
-    /parent directory identity changed|identity is unsupported/u,
+    /parent directory identity changed/u,
   );
 
   assert.equal(await readFile(stateFile, 'utf8'), '{"replacement":true}\n');
@@ -2904,7 +2936,7 @@ test('Windows state rejects a rechecked parent on another volume with the same f
         isSymbolicLink: () => false,
       };
     }
-    const stats = await lstat(candidate, options);
+    const stats = windowsTestStats(await lstat(candidate, options));
     if (candidate !== directory) return stats;
     parentLstatCalls += 1;
     if (parentLstatCalls !== identityRecheckCall) return stats;
@@ -2931,7 +2963,7 @@ test('Windows state rejects a rechecked parent on another volume with the same f
         await rename(...args);
       },
     }),
-    /parent directory identity changed|identity is unsupported/u,
+    /parent directory identity changed/u,
   );
   assert.equal(parentLstatCalls >= 2, true);
   assert.equal(commitCalled, false);
@@ -2957,7 +2989,7 @@ test('Windows state load rejects a rechecked parent on another volume with the s
         isSymbolicLink: () => false,
       };
     }
-    const stats = await lstat(candidate, options);
+    const stats = windowsTestStats(await lstat(candidate, options));
     if (candidate !== directory) return stats;
     parentLstatCalls += 1;
     if (parentLstatCalls !== 2) return stats;
