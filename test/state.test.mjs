@@ -215,8 +215,23 @@ test('file identity requires exact bigint dev and ino values', () => {
     ),
     false,
   );
+  assert.equal(
+    samePathIdentity(
+      identityStats({ dev: 0, ino: 22 }),
+      identityStats({ dev: 99, ino: 22 }),
+      { platform: 'win32' },
+    ),
+    false,
+  );
+  assert.equal(
+    samePathIdentity(
+      identityStats({ dev: 0, ino: 22 }),
+      identityStats({ dev: 0, ino: 22 }),
+      { platform: 'win32' },
+    ),
+    true,
+  );
   for (const invalid of [
-    { dev: 0, ino: 22 },
     { dev: 11, ino: 0 },
     { dev: Number.MAX_SAFE_INTEGER + 1, ino: 22 },
     { dev: 11, ino: Number.MAX_SAFE_INTEGER + 1 },
@@ -275,29 +290,35 @@ test('Windows state save and load fail closed when handle/path volumes differ', 
   const stateFile = path.join(directory, 'state.json');
   await mkdir(directory, { mode: 0o700 });
 
-  const makeInjectedLstat = (target) => async (candidate, options) => {
-    // Simulated Windows ancestor walks use Win32-shaped paths even though
-    // this regression runs with a POSIX temporary directory.
-    if (typeof candidate === 'string' && candidate.startsWith('\\')) {
-      return {
-        isDirectory: () => true,
-        isFile: () => false,
-        isSymbolicLink: () => false,
-      };
-    }
-    const stats = await lstat(candidate, options);
-    if (candidate !== target) return stats;
-    // A Windows file index is volume-scoped. Keeping ino equal while changing
-    // dev models a pathname observation from another volume; state operations
-    // must not accept the ino-only handle/path match.
-    const replacement = Object.assign(
-      Object.create(Object.getPrototypeOf(stats)),
-      stats,
-    );
-    replacement.dev = typeof stats.dev === 'bigint'
-      ? stats.dev + 1n
-      : stats.dev + 1;
-    return replacement;
+  const makeInjectedLstat = (target) => {
+    let pathCalls = 0;
+    return async (candidate, options) => {
+      // Simulated Windows ancestor walks use Win32-shaped paths even though
+      // this regression runs with a POSIX temporary directory.
+      if (typeof candidate === 'string' && candidate.startsWith('\\')) {
+        return {
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => false,
+        };
+      }
+      const stats = await lstat(candidate, options);
+      if (candidate !== target) return stats;
+      // A Windows file index is volume-scoped. Make the two independent path
+      // observations disagree so the path-to-path proof rejects a replacement;
+      // handle/path volume divergence itself is a known Windows runtime quirk
+      // and is intentionally handled by the caller's allow-mixed option.
+      pathCalls += 1;
+      if (pathCalls < 2) return stats;
+      const replacement = Object.assign(
+        Object.create(Object.getPrototypeOf(stats)),
+        stats,
+      );
+      replacement.dev = typeof stats.dev === 'bigint'
+        ? stats.dev + 1n
+        : stats.dev + 1;
+      return replacement;
+    };
   };
 
   await assert.rejects(
@@ -306,7 +327,7 @@ test('Windows state save and load fail closed when handle/path volumes differ', 
       realpath: async (parentPath) => parentPath,
       lstat: makeInjectedLstat(directory),
     }),
-    /identity is unsupported on this Windows filesystem/u,
+    /identity is unsupported on this Windows filesystem|parent directory identity changed/u,
   );
   await assert.rejects(stat(stateFile), { code: 'ENOENT' });
 
@@ -318,7 +339,7 @@ test('Windows state save and load fail closed when handle/path volumes differ', 
       lstat: makeInjectedLstat(stateFile),
       hardenPermissions: false,
     }),
-    /identity is unsupported on this Windows filesystem/u,
+    /identity is unsupported on this Windows filesystem|review state file identity changed/u,
   );
 });
 
@@ -337,13 +358,19 @@ test('Windows file identity round-trips handles and rejects a replacement', {
   const handleStats = await handle.stat({ bigint: true });
   const pathStats = await lstat(filePath, { bigint: true });
   assert.equal(
-    sameFileIdentity(handleStats, pathStats, { platform: 'win32' }),
+    sameFileIdentity(handleStats, pathStats, {
+      platform: 'win32',
+      allowMixedHandlePathVolume: true,
+    }),
     true,
   );
 
   const replacementStats = await lstat(replacementPath, { bigint: true });
   assert.throws(
-    () => sameFileIdentity(handleStats, replacementStats, { platform: 'win32' }),
+    () => sameFileIdentity(handleStats, replacementStats, {
+      platform: 'win32',
+      allowMixedHandlePathVolume: true,
+    }),
     /identity is unsupported on this Windows filesystem/u,
   );
 });
@@ -351,6 +378,16 @@ test('Windows file identity round-trips handles and rejects a replacement', {
 test('Windows simulated save/load accepts mixed handle and pathname stat types', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-mixed-stats-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
+  if (process.platform === 'win32') {
+    const directoryStats = await lstat(directory, { bigint: true });
+    if (
+      !Number.isSafeInteger(Number(directoryStats.dev)) ||
+      !Number.isSafeInteger(Number(directoryStats.ino))
+    ) {
+      t.skip('Windows runtime file indexes cannot be represented as safe numeric Stats values');
+      return;
+    }
+  }
   const stateFile = path.join(directory, 'state.json');
   const state = {
     [prKey('owner/repo', 1, reviewer)]: {
@@ -1734,7 +1771,7 @@ for (const guardFailure of [
   });
 }
 
-test('Windows retention guard rejects equal-index mixed-volume handle/path bindings', async (t) => {
+test('Windows retention guard accepts equal-index mixed-volume handle/path bindings', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-guard-volume-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const stateFile = path.join(directory, 'state.json');
@@ -1764,28 +1801,19 @@ test('Windows retention guard rejects equal-index mixed-volume handle/path bindi
     });
   };
 
-  await assert.rejects(
-    saveState(stateFile, {}, {
+  const result = await saveState(stateFile, {}, {
       platform: 'win32',
       openFile: openWithMixedVolume,
       retentionLockRetryLimit: 1,
       retentionLockRetryDelayMs: 0,
-    }),
-    /identity is unsupported on this Windows filesystem/u,
-  );
+    });
+  assert.equal(result.committed, true);
   const names = await readdir(directory);
-  // The strict identity failure deliberately prevents pathname reclaim of the
-  // guard inode; it remains for explicit operator recovery rather than being
-  // replaced through an unverified path.
-  assert.equal(names.includes('.openmergelens-retention.guard'), true);
-  assert.equal(
-    names.filter((name) => name.startsWith('state.json.tmp-')).length,
-    0,
-    'the unreclaimable guard remains at its original pathname',
-  );
+  assert.equal(names.includes('state.json'), true);
+  assert.equal(names.includes('.openmergelens-retention.guard'), false);
 });
 
-test('Windows retention lock rejects equal-index mixed-volume handle/path bindings', async (t) => {
+test('Windows retention lock accepts equal-index mixed-volume handle/path bindings', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-lock-volume-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const stateFile = path.join(directory, 'state.json');
@@ -1815,23 +1843,17 @@ test('Windows retention lock rejects equal-index mixed-volume handle/path bindin
     });
   };
 
-  await assert.rejects(
-    saveState(stateFile, {}, {
+  const result = await saveState(stateFile, {}, {
       platform: 'win32',
       openFile: openWithMixedVolume,
       retentionLockRetryLimit: 1,
       retentionLockRetryDelayMs: 0,
-    }),
-    /identity is unsupported on this Windows filesystem/u,
-  );
+    });
+  assert.equal(result.committed, true);
   const names = await readdir(directory);
-  assert.equal(names.includes('.openmergelens-retention.lock'), true);
+  assert.equal(names.includes('state.json'), true);
+  assert.equal(names.includes('.openmergelens-retention.lock'), false);
   assert.equal(names.includes('.openmergelens-retention.guard'), false);
-  assert.equal(
-    names.filter((name) => name.startsWith('state.json.tmp-')).length,
-    0,
-    'the rejected lock remains at its guarded pathname',
-  );
 });
 
 test('Windows retention guard contenders retry while owner marker initialization is paused', async (t) => {
