@@ -212,6 +212,74 @@ test('Bitbucket tracked changed heads do not review when the reviewer is no long
   assert.equal(diffCalls, 0);
 });
 
+test('unrequested Bitbucket tracked candidates do not consume requested-review capacity', async () => {
+  const trackedRepositories = Array.from(
+    { length: 20 },
+    (_value, index) => `tracked-${index}/repo`,
+  );
+  const requestedRepository = 'requested/repo';
+  const configuredAccount = {
+    ...account,
+    repositories: [...trackedRepositories, requestedRepository],
+  };
+  const state = Object.fromEntries(trackedRepositories.map((repo) => [
+    prKey(repo, 1, configuredAccount),
+    {
+      lastReviewedSha: 'old-head',
+      lastReviewedAt: '2026-08-17T00:00:00.000Z',
+    },
+  ]));
+  let reviewerCalls = 0;
+  const result = await pollOnce({
+    config: {
+      configVersion: 6,
+      githubAccounts: [],
+      bitbucketAccounts: [configuredAccount],
+      aiProcessingConsent: createAiProcessingConsent('reviewer', [configuredAccount]),
+      reviewerCommand: 'reviewer', model: null, reviewBatchSize: 1,
+      reviewFocusCount: 1, reviewTimeoutMs: 60_000,
+    },
+    stateFile: '/unused/state.json',
+    defaultReviewPromptPath: '/unused/template.md',
+    dryRun: true,
+    logger: {
+      child: () => ({ info() {}, warn() {}, error() {}, output() {} }),
+      info() {}, warn() {}, error() {}, output() {}, flush: async () => {},
+    },
+    dependencies: {
+      createGitHubMutationQueue: () => ({ run: (operation) => operation() }),
+      createGitHubMutationCadence: () => ({ run: (operation) => operation() }),
+      resolveBitbucketAuth: async () => ({
+        ...configuredAccount, username: configuredAccount.credentialUsername, password: 'secret',
+      }),
+      searchBitbucketReviewRequestedPRs: async ({ repo }) =>
+        repo === requestedRepository ? [{ repo, number: 1 }] : [],
+      getBitbucketPullRequest: async ({ repo }) => ({
+        headRefOid: 'new-head', number: 1, title: 'PR', body: '', state: 'OPEN',
+        url: `https://bitbucket.org/${repo}/pull-requests/1`,
+      }),
+      bitbucketReviewAlreadyPosted: async () => false,
+      getBitbucketPullRequestDiff: async () => '+++ b/a.js\n@@ -0,0 +1 @@\n+line\n',
+      ensureReviewPrompt: async () => '/virtual/prompt.md',
+      readPrompt: async () => '{{diff}}',
+      readLearnings: async () => '',
+      invokeMultiPassReview: async () => {
+        reviewerCalls += 1;
+        return { summary: 'Summary', findings: [] };
+      },
+      prepareBitbucketReview: () => ({ anchorable: [], unanchorable: [] }),
+      loadState: async () => state,
+      saveState: async () => {},
+    },
+  });
+
+  assert.equal(result.failed, false);
+  assert.equal(reviewerCalls, 1);
+  assert.equal(result.reviewed, 1);
+  assert.equal(result.outcomes[0].repo, requestedRepository);
+  assert.equal(result.outcomes[0].status, 'dry-run');
+});
+
 test('Bitbucket expires an open unrequested posting plan into a fail-closed terminal head', async () => {
   const key = prKey('workspace/repo', 7, account);
   const loadedState = {};
