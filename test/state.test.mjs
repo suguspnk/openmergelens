@@ -22,7 +22,7 @@ import {
   candidateCursorFor,
   expireReviewState,
   flushStateDirectoryHandle,
-  loadState,
+  loadState as loadStateImplementation,
   MAX_LEGACY_STATE_FILE_BYTES,
   migrateLegacyStateForReviewer,
   needsReview,
@@ -40,7 +40,7 @@ import {
   reviewerKey,
   sameFileIdentity,
   samePathIdentity,
-  saveState,
+  saveState as saveStateImplementation,
   serializeState,
   STATE_METADATA_KEY,
 } from '../lib/state.mjs';
@@ -56,9 +56,78 @@ const saveStateModuleUrl = new URL('../lib/state.mjs', import.meta.url).href;
 
 const reviewer = { hostname: 'github.com', username: 'OctoCat' };
 
+// Node 22 on the hosted Windows runner exposes a valid file index but reports
+// a zero volume field for pathname Stats. Production path identity remains
+// strict; this seam gives simulated Windows tests the explicit, valid volume
+// proof they need without weakening the identity helper or hiding an actual
+// replacement. Custom lstat seams are wrapped after they make their own
+// mutation, so a test-supplied mismatched volume remains observable.
+function windowsTestStats(stats) {
+  const devUnavailable = typeof stats?.dev === 'bigint'
+    ? stats.dev <= 0n
+    : typeof stats?.dev === 'number' &&
+      (!Number.isSafeInteger(stats.dev) || stats.dev <= 0);
+  if (process.platform !== 'win32' ||
+      !devUnavailable ||
+      typeof stats?.ino !== 'bigint' ||
+      stats.ino <= 0n) {
+    return stats;
+  }
+  const normalized = Object.assign(
+    Object.create(Object.getPrototypeOf(stats)),
+    stats,
+  );
+  normalized.dev = 1n;
+  return normalized;
+}
+
+function windowsTestOptions(options = {}) {
+  if (process.platform !== 'win32' || options.platform === 'linux') {
+    return options;
+  }
+  const baseLstat = options.lstat || lstat;
+  return {
+    ...options,
+    lstat: async (...args) => windowsTestStats(await baseLstat(...args)),
+  };
+}
+
+function saveState(...args) {
+  const [stateFile, state, options] = args;
+  return saveStateImplementation(stateFile, state, windowsTestOptions(options));
+}
+
+function loadState(...args) {
+  const [stateFile, options] = args;
+  return loadStateImplementation(stateFile, windowsTestOptions(options));
+}
+
 function runWindowsSaveChild(stateFile) {
   const script = `
     import { saveState, prKey } from ${JSON.stringify(saveStateModuleUrl)};
+    import { lstat as fsLstat } from 'node:fs/promises';
+    const lstat = async (...args) => {
+      if (typeof args[0] === 'string' && args[0].startsWith('\\\\')) {
+        return {
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => false,
+        };
+      }
+      const stats = await fsLstat(...args);
+      const devUnavailable = typeof stats.dev === 'bigint'
+        ? stats.dev <= 0n
+        : typeof stats.dev === 'number' &&
+          (!Number.isSafeInteger(stats.dev) || stats.dev <= 0);
+      if (!devUnavailable ||
+          typeof stats.ino !== 'bigint' || stats.ino <= 0n) return stats;
+      const normalized = Object.assign(
+        Object.create(Object.getPrototypeOf(stats)),
+        stats,
+      );
+      normalized.dev = 1n;
+      return normalized;
+    };
     const state = {
       [prKey('owner/repo', 1, { hostname: 'github.com', username: 'child' })]: {
         lastReviewedSha: 'child-sha',
@@ -68,6 +137,7 @@ function runWindowsSaveChild(stateFile) {
     try {
       await saveState(process.argv[1], state, {
         platform: 'win32',
+        lstat,
         hardenHandle: async () => {
           await new Promise((resolve) => setTimeout(resolve, 40));
           throw new Error('child pre-rename failure');
@@ -381,10 +451,7 @@ test('Windows simulated save/load accepts mixed handle and pathname stat types',
   t.after(() => rm(directory, { recursive: true, force: true }));
   if (process.platform === 'win32') {
     const directoryStats = await lstat(directory, { bigint: true });
-    if (
-      !Number.isSafeInteger(Number(directoryStats.dev)) ||
-      !Number.isSafeInteger(Number(directoryStats.ino))
-    ) {
+    if (!Number.isSafeInteger(Number(directoryStats.ino))) {
       t.skip('Windows runtime file indexes cannot be represented as safe numeric Stats values');
       return;
     }
@@ -2144,16 +2211,26 @@ for (const failure of [
   {
     name: 'parent identity failure',
     option: (directory) => {
-      let parentChecks = 0;
+      const lockPath = path.join(directory, '.openmergelens-retention.lock');
+      let failed = false;
       return {
         lstat: async (...args) => {
-          if (args[0] === directory) {
-            parentChecks += 1;
-            if (parentChecks === 3) {
-              throw Object.assign(new Error('transient retention identity failure'), {
-                code: 'EIO',
-              });
+          if (args[0] === directory && !failed) {
+            // The parent identity check must fail after the retention lock has
+            // been claimed, otherwise there is no reservation inode to move
+            // out of the lock pathname and the recovery assertion is testing
+            // an earlier setup failure. This condition is stable across the
+            // longer Windows ancestor walk on hosted runners.
+            try {
+              await lstat(lockPath);
+            } catch (error) {
+              if (error?.code !== 'ENOENT') throw error;
+              return lstat(...args);
             }
+            failed = true;
+            throw Object.assign(new Error('transient retention identity failure'), {
+              code: 'EIO',
+            });
           }
           // Hosted POSIX paths are used to model the Windows platform. The
           // Windows ancestor walk normalizes them to backslashes; keep that
