@@ -13,7 +13,9 @@ const alphabeticPartitions = [
 // timeout. Keep the default timeout unchanged and split only that file's
 // window so each title still belongs to exactly one deterministic partition.
 const pollerTestPartitions = [
-  '^[A-Ca-c]',
+  '^[Aa]',
+  '^[Bb]',
+  '^[Cc]',
   '^[D-Fd-f]',
   ...alphabeticPartitions.slice(1),
 ];
