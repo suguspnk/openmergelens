@@ -8,6 +8,16 @@ const alphabeticPartitions = [
   '^[S-Zs-z]',
 ];
 
+// The poller suite's A-F window contains several state-capacity and
+// reconciliation scenarios that exceed the hosted Windows 30-second test
+// timeout. Keep the default timeout unchanged and split only that file's
+// window so each title still belongs to exactly one deterministic partition.
+const pollerTestPartitions = [
+  '^[A-Ca-c]',
+  '^[D-Fd-f]',
+  ...alphabeticPartitions.slice(1),
+];
+
 export const partitionPatterns = new Map([
   ['poller-performance.test.mjs', alphabeticPartitions],
   ['poller-state-gc-capacity.test.mjs', [
@@ -17,5 +27,5 @@ export const partitionPatterns = new Map([
     '^legacy over-cap (?:deadline|expiry|repair (?:accumulates|performs|persists|progress))',
     '^[M-Zm-z]',
   ]],
-  ['poller.test.mjs', alphabeticPartitions],
+  ['poller.test.mjs', pollerTestPartitions],
 ]);
