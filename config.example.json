@@ -1,5 +1,5 @@
 {
-  "configVersion": 5,
+  "configVersion": 6,
   "aiProcessingConsent": null,
   "githubAccounts": [
     {
@@ -18,6 +18,7 @@
       ]
     }
   ],
+  "bitbucketAccounts": [],
   "reviewerCommand": "claude -p --output-format text --setting-sources \"\" --strict-mcp-config --permission-mode dontAsk --max-turns 100 --tools \"\"",
   "model": null,
   "reviewerInputMode": "stdin",

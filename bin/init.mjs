@@ -14,6 +14,7 @@ import {
   CONFIG_VERSION,
   saveConfig,
   validateConfig,
+  validateNormalizedConfig,
 } from '../lib/config.mjs';
 import {
   listAuthenticatedAccounts,
@@ -85,9 +86,10 @@ export function buildSetupConfig({
   desktopNotifications,
   existingConfig,
 } = {}) {
-  return validateConfig({
+  return validateNormalizedConfig({
     configVersion: CONFIG_VERSION,
     githubAccounts,
+    bitbucketAccounts: existingConfig?.bitbucketAccounts || [],
     aiProcessingConsent,
     reviewerCommand,
     model,
@@ -352,15 +354,17 @@ async function main() {
     // Consent covers the complete selected repository set only after the user
     // evaluates one specific shared reviewer backend. A backend change can
     // change the external processor and its retention/training terms.
+    const bitbucketAccounts = existingConfig?.bitbucketAccounts || [];
     let aiProcessingConsent = retainAiProcessingConsent(
       existingConfig?.aiProcessingConsent,
       existingConfig?.reviewerCommand,
       reviewerCommand,
-      existingConfig?.githubAccounts,
-      githubAccounts,
+      [...(existingConfig?.githubAccounts || []), ...(existingConfig?.bitbucketAccounts || [])],
+      [...githubAccounts, ...bitbucketAccounts],
     );
     if (!aiProcessingConsent) {
-      const repositoryCount = githubAccounts.reduce(
+      const allAccounts = [...githubAccounts, ...bitbucketAccounts];
+      const repositoryCount = allAccounts.reduce(
         (total, account) => total + account.repositories.length,
         0,
       );
@@ -373,13 +377,13 @@ async function main() {
       const consent = await p.confirm({
         message:
           `Authorize third-party AI processing for all ${repositoryCount} selected ` +
-          `repositories across ${githubAccounts.length} account(s)?`,
+          `repositories across ${allAccounts.length} account(s)?`,
         initialValue: false,
       });
       if (p.isCancel(consent) || !consent) exitCancelled();
       aiProcessingConsent = createAiProcessingConsent(
         reviewerCommand,
-        githubAccounts,
+        allAccounts,
       );
     }
 

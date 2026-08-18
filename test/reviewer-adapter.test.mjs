@@ -25,6 +25,7 @@ import {
   INCOMPLETE_INSPECTION_ERROR,
 } from '../lib/reviewer-github-gateway.mjs';
 import {
+  MAX_REVIEW_PROMPT_BYTES,
   MAX_REVIEW_PATH_CHARS,
   MAX_REVIEW_STDOUT_BYTES,
 } from '../lib/security-limits.mjs';
@@ -608,6 +609,50 @@ test('buildPrompt sends a PR link and tool-based inspection contract instead of 
   assert.doesNotMatch(prompt, /diff --git/);
 });
 
+test('buildPrompt embeds a provider diff when no constrained provider gateway exists', () => {
+  const prompt = buildPrompt({
+    template: 'Target {{pr_url}}\n\n{{diff}}',
+    learnings: '',
+    pr: {
+      title: 'Change',
+      number: 7,
+      body: 'Description',
+      url: 'https://bitbucket.org/workspace/repo/pull-requests/7',
+      headRefOid: 'abc123',
+    },
+    providerDiff: '+++ b/a.js\n@@ -0,0 +1 @@\n+line\n',
+  });
+  assert.match(prompt, /\+\+\+ b\/a\.js/u);
+  assert.match(prompt, /No provider credentials or external inspection tools/u);
+  assert.doesNotMatch(prompt, /diff intentionally not embedded/u);
+});
+
+test('bundled Bitbucket prompt embeds fetched metadata and has no GitHub-only inspection contract', async () => {
+  const template = await readFile(
+    new URL('../docs/review-prompt.default.md', import.meta.url),
+    'utf8',
+  );
+  const prompt = buildPrompt({
+    template,
+    learnings: '',
+    pr: {
+      title: 'Bitbucket title',
+      number: 7,
+      body: 'Bitbucket description',
+      url: 'https://bitbucket.org/workspace/repo/pull-requests/7',
+      headRefOid: 'abc123',
+    },
+    providerDiff: '+++ b/a.js\n@@ -0,0 +1 @@\n+line\n',
+  });
+
+  assert.match(prompt, /Bitbucket title/u);
+  assert.match(prompt, /Bitbucket description/u);
+  assert.match(prompt, /\+\+\+ b\/a\.js/u);
+  assert.match(prompt, /untrusted pull-request metadata and diff/iu);
+  assert.doesNotMatch(prompt, /GitHub/iu);
+  assert.doesNotMatch(prompt, /openmergelens\.inspect_github_pr|cumulative_diff|file_context/u);
+});
+
 test('buildPrompt never embeds the untrusted PR body', () => {
   const prompt = buildPrompt({
     template: '{{diff}}\n{{pr_body}}',
@@ -1028,6 +1073,136 @@ test('invokeMultiPassReview runs independent passes then one synthesis pass', as
   assert.match(prompts[2], /Candidate findings from independent passes/);
   assert.match(prompts[2], /https:\/\/github\.com\/example\/repo\/pull\/42/);
   assert.deepEqual(result, { summary: 'Merged review.', findings: [finalFinding] });
+});
+
+test('invokeMultiPassReview covers an oversized provider diff in bounded contiguous chunks', async () => {
+  const line = ` ${'x'.repeat(78)}\n`;
+  const lineCount = Math.ceil(
+    (MAX_REVIEW_PROMPT_BYTES + 120_000) / Buffer.byteLength(line),
+  );
+  const providerDiff = 'diff --git a/src/a.js b/src/a.js\n' +
+    '--- a/src/a.js\n' +
+    '+++ b/src/a.js\n' +
+    `@@ -10,${lineCount} +20,${lineCount} @@\n` +
+    line.repeat(lineCount);
+  const prompts = [];
+  let chunkSynthesis = 0;
+  const invoke = async ({ prompt }) => {
+    prompts.push(prompt);
+    assert.ok(Buffer.byteLength(prompt, 'utf8') <= MAX_REVIEW_PROMPT_BYTES);
+    if (prompt.startsWith('## Final synthesis for a bounded provider review')) {
+      for (let index = 1; index <= chunkSynthesis; index += 1) {
+        assert.match(prompt, new RegExp(`Chunk finding ${index}`, 'u'));
+      }
+      return JSON.stringify({
+        summary: 'Complete bounded review',
+        findings: [
+          { path: 'src/a.js', line: 1, severity: 'major', comment: 'Shared issue' },
+          { path: 'src/a.js', line: 1, severity: 'major', comment: 'Shared issue' },
+          { path: 'src/a.js', line: 1, severity: 'major', comment: 'Distinct issue' },
+        ],
+      });
+    }
+    if (prompt.includes('Synthesize all focused results for this exact chunk')) {
+      chunkSynthesis += 1;
+      return JSON.stringify({
+        summary: `Chunk ${chunkSynthesis}`,
+        findings: [{
+          path: 'src/a.js',
+          line: 1,
+          severity: 'major',
+          comment: `Chunk finding ${chunkSynthesis}`,
+        }],
+      });
+    }
+    return JSON.stringify({ summary: 'Focused chunk', findings: [] });
+  };
+
+  const result = await invokeMultiPassReview({
+    reviewerCommand: 'reviewer',
+    template: '{{pr_title}}\n{{pr_body}}\n{{diff}}',
+    learnings: '',
+    pr: {
+      title: 'Large change',
+      number: 7,
+      body: 'Description',
+      url: 'https://bitbucket.org/workspace/repo/pull-requests/7',
+      headRefOid: 'abc123',
+    },
+    providerDiff,
+    reviewFocusCount: 1,
+    invoke,
+  });
+
+  assert.ok(chunkSynthesis > 1);
+  const ranges = prompts
+    .filter((prompt) => prompt.includes('Pass: behavior and correctness'))
+    .map((prompt) => {
+      const match = prompt.match(/byte range \[(\d+), (\d+)\) of exactly (\d+) bytes/u);
+      assert.ok(match);
+      return match.slice(1).map(Number);
+    });
+  assert.equal(ranges[0][0], 0);
+  for (let index = 1; index < ranges.length; index += 1) {
+    assert.equal(ranges[index - 1][1], ranges[index][0]);
+  }
+  assert.equal(ranges.at(-1)[1], Buffer.byteLength(providerDiff, 'utf8'));
+  assert.ok(ranges.every((range) => range[2] === Buffer.byteLength(providerDiff, 'utf8')));
+  let expectedOldLine = 10;
+  let expectedNewLine = 20;
+  for (const prompt of prompts.filter((value) =>
+    value.includes('Pass: behavior and correctness'))) {
+    assert.match(prompt, /diff --git a\/src\/a\.js b\/src\/a\.js/u);
+    assert.match(prompt, /--- a\/src\/a\.js/u);
+    assert.match(prompt, /\+\+\+ b\/src\/a\.js/u);
+    const hunk = prompt.match(
+      /@@ -(\d+),(\d+) \+(\d+),(\d+) @@\n((?: x+\n?)*)/u,
+    );
+    assert.ok(hunk);
+    const oldStart = Number(hunk[1]);
+    const oldCount = Number(hunk[2]);
+    const newStart = Number(hunk[3]);
+    const newCount = Number(hunk[4]);
+    const actualLines = hunk[5].split('\n').filter(Boolean).length;
+    assert.equal(oldStart, expectedOldLine);
+    assert.equal(newStart, expectedNewLine);
+    assert.equal(oldCount, actualLines);
+    assert.equal(newCount, actualLines);
+    expectedOldLine += actualLines;
+    expectedNewLine += actualLines;
+  }
+  assert.equal(expectedOldLine, lineCount + 10);
+  assert.equal(expectedNewLine, lineCount + 20);
+  assert.deepEqual(
+    result.findings.map((finding) => finding.comment),
+    ['Shared issue', 'Distinct issue'],
+  );
+});
+
+test('invokeMultiPassReview rejects repeated provider diff placeholders before reviewer invocation', async () => {
+  let invocations = 0;
+  await assert.rejects(
+    invokeMultiPassReview({
+      reviewerCommand: 'reviewer',
+      template: '{{pr_title}}\n{{diff}}\nRepeated diff:\n{{diff}}',
+      learnings: '',
+      pr: {
+        title: 'Change',
+        number: 7,
+        body: 'Description',
+        url: 'https://bitbucket.org/workspace/repo/pull-requests/7',
+        headRefOid: 'abc123',
+      },
+      providerDiff: 'diff --git a/a.js b/a.js\n',
+      reviewFocusCount: 1,
+      invoke: async () => {
+        invocations += 1;
+        return JSON.stringify({ summary: 'Unexpected', findings: [] });
+      },
+    }),
+    /at most one \{\{diff\}\} placeholder/u,
+  );
+  assert.equal(invocations, 0);
 });
 
 test('invokeMultiPassReview aborts before synthesis when a focused pass is malformed', async () => {

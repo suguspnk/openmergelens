@@ -91,6 +91,46 @@ test('init preserves a manually configured reviewer timeout when rebuilding conf
   assert.equal(rebuilt.desktopNotifications, false);
 });
 
+test('init preserves normalized Bitbucket Cloud accounts when rebuilding config', () => {
+  const githubAccounts = [{
+    hostname: 'github.com',
+    username: 'work',
+    repositories: ['owner/repo'],
+  }];
+  const bitbucketAccounts = [{
+    hostname: 'bitbucket.org',
+    accountId: '{123e4567-e89b-42d3-a456-426614174000}',
+    credentialUsername: 'reviewer@example.com',
+    repositories: ['workspace/repo'],
+  }];
+  const allAccounts = [...githubAccounts, ...bitbucketAccounts];
+  const existingConfig = {
+    configVersion: 6,
+    githubAccounts,
+    bitbucketAccounts,
+    aiProcessingConsent: createAiProcessingConsent(CODEX_REVIEWER_COMMAND, allAccounts),
+    reviewerCommand: CODEX_REVIEWER_COMMAND,
+    model: null,
+    reviewBatchSize: 2,
+    reviewFocusCount: 4,
+    reviewTimeoutMs: 15 * 60 * 1000,
+    desktopNotifications: true,
+    stateFile: './state.json',
+  };
+
+  const rebuilt = buildSetupConfig({
+    githubAccounts,
+    aiProcessingConsent: existingConfig.aiProcessingConsent,
+    reviewerCommand: existingConfig.reviewerCommand,
+    model: existingConfig.model,
+    reviewFocusCount: existingConfig.reviewFocusCount,
+    desktopNotifications: true,
+    existingConfig,
+  });
+
+  assert.deepEqual(rebuilt.bitbucketAccounts, bitbucketAccounts);
+});
+
 test('init rejects an unsupported cron interval before scheduler reconciliation', async () => {
   let reconciled = false;
 

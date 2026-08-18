@@ -35,6 +35,19 @@ function createConfig() {
   });
 }
 
+function createBitbucketConfig() {
+  const account = {
+    accountId: '{123e4567-e89b-42d3-a456-426614174000}',
+    credentialUsername: 'reviewer@example.com',
+    repositories: ['workspace/repo'],
+  };
+  return validateConfig({
+    ...createConfig(),
+    githubAccounts: [],
+    bitbucketAccounts: [account],
+  });
+}
+
 test('config menus expose every mutable area and current values', () => {
   const config = createConfig();
   const options = configMenuOptions(config);
@@ -82,6 +95,25 @@ test('config updates save immediately and skip redundant writes', async () => {
     save,
   });
   assert.equal(unchanged.changed, false);
+  assert.equal(writes.length, 1);
+});
+
+test('config editor preserves normalized Bitbucket accounts through an unrelated edit', async () => {
+  const currentConfig = createBitbucketConfig();
+  const writes = [];
+  const changed = await persistConfigUpdate({
+    configPath: '/tmp/openmergelens-config.json',
+    currentConfig,
+    nextConfig: { ...currentConfig, reviewBatchSize: 2 },
+    save: async (_configPath, config) => {
+      writes.push(config);
+      return config;
+    },
+  });
+
+  assert.equal(changed.changed, true);
+  assert.equal(changed.config.reviewBatchSize, 2);
+  assert.deepEqual(changed.config.bitbucketAccounts, currentConfig.bitbucketAccounts);
   assert.equal(writes.length, 1);
 });
 

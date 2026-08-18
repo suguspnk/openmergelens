@@ -128,7 +128,7 @@ test('the bundled manual config requires init to record bulk consent', async () 
     await readFile(path.join(projectRoot, 'config.example.json'), 'utf8'),
   );
 
-  assert.equal(example.configVersion, 5);
+  assert.equal(example.configVersion, 6);
   assert.equal(example.aiProcessingConsent, null);
 });
 

@@ -1,6 +1,6 @@
 # OpenMergeLens
 
-**A local CLI that automates AI code reviews for GitHub pull requests using
+**A local CLI that automates AI code reviews for GitHub and Bitbucket Cloud pull requests using
 Codex, Claude Code, or any compatible MCP-enabled reviewer CLI.**
 
 [Website](https://suguspnk.github.io/openmergelens/) ·
@@ -9,7 +9,8 @@ Codex, Claude Code, or any compatible MCP-enabled reviewer CLI.**
 [Get help](https://github.com/suguspnk/openmergelens/discussions)
 
 OpenMergeLens runs on your own machine on a schedule (cron / launchd / Windows
-Task Scheduler). It requires no GitHub App, webhook, or server. It uses `gh` to find
+Task Scheduler). It requires no GitHub App, Bitbucket app, webhook, or server. It uses `gh` or the
+Bitbucket Cloud REST API to find
 open PRs where one of your configured accounts has an active review request. The
 request can be added manually or created automatically by a matching
 [CODEOWNERS](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners)
@@ -221,8 +222,9 @@ After running the command for the package manager you used, copy
 
 | Field | Meaning |
 |---|---|
-| `configVersion` | Required schema version; currently `5`. Version 2 repository-scoped consent and version 3 and 4 configs are migrated conservatively; older/single-account shapes are rejected. |
-| `githubAccounts` | Non-empty array of `{ hostname, username, repositories }`. Each repository list contains explicit `OWNER/REPO` strings. |
+| `configVersion` | Required schema version; currently `6`. Version 5 GitHub-only configs load in memory with an empty Bitbucket account list; older supported versions are migrated conservatively. |
+| `githubAccounts` | Array of `{ hostname, username, repositories }`. Each repository list contains explicit `OWNER/REPO` strings. May be empty when Bitbucket is configured. |
+| `bitbucketAccounts` | Array of Bitbucket Cloud `{ accountId, credentialUsername, repositories }` records. `accountId` is the stable braced UUID returned by `GET /2.0/user`; repositories are explicit `WORKSPACE/REPO` strings. Bitbucket Data Center/Server is not supported. |
 | `aiProcessingConsent` | A setup-generated scoped authorization covering all repositories selected across every configured account for the configured reviewer backend. Missing, `null`, malformed, or scope-mismatched consent prevents every repository from reaching the reviewer. Changing the backend or selected set requires one fresh bulk confirmation. Leave this `null` in hand-written config, then run `openmergelens init` or `openmergelens config` to record consent. |
 | `reviewerCommand` | Agent command that reads a prompt on stdin, uses the provided MCP inspection tool, and prints review JSON on stdout. Generated Codex/Claude commands are configured automatically. A custom command must include both `{{mcp_config}}` and `{{mcp_tool}}` in the appropriate MCP-config and allowed-tool arguments; OpenMergeLens fills them per review and rejects custom commands without this explicit contract. |
 | `model` | Optional object controlling the selected generated Codex/Claude backend. `null` uses both CLI defaults. Otherwise use `{ "id": "…", "reasoningEffort": "…" }`; either property may be `null` independently. Model IDs are validated before being added to the command. Custom reviewer commands must leave this field `null`. |
@@ -234,12 +236,78 @@ After running the command for the package manager you used, copy
 
 `~/.openmergelens/config.json` is local, machine-specific config. It is never
 committed to a repo. It stores hostnames and usernames, never tokens. Each poll
-retrieves every selected account's token from the GitHub CLI credential store.
-The reviewer never receives that token. Instead, OpenMergeLens exposes one
+retrieves every selected GitHub account's token from the GitHub CLI credential store.
+For Bitbucket Cloud, configure a noninteractive HTTPS credential in Git's credential
+store for `bitbucket.org` and the exact `credentialUsername` first, for example with
+your platform credential helper; OpenMergeLens invokes `git credential fill` and
+never writes the returned token to config, state, logs, reviewer arguments, or the
+reviewer environment. Each poll verifies that `/2.0/user` returns the configured
+`accountId`. The reviewer never receives provider credentials. For GitHub,
+OpenMergeLens exposes one
 temporary structured inspection tool backed by a per-review local gateway
 that permits only GET operations for the fixed PR and its repository. The
 generated Codex command denies host-file reads outside its isolated workspace,
 has no direct network access, and fails closed on unknown configuration.
+
+With a Git credential helper already configured, store the Bitbucket API token
+without placing it in shell history by running `git credential approve`, typing
+the following records at its stdin, and then entering a final blank line:
+
+```text
+protocol=https
+host=bitbucket.org
+username=reviewer@example.com
+password=<Bitbucket Cloud API token>
+```
+
+Use the same username in `credentialUsername`. Obtain `accountId` from the
+authenticated Bitbucket Cloud `GET https://api.bitbucket.org/2.0/user` response;
+copy its `uuid` exactly, including braces. OpenMergeLens never prompts during a
+poll: a missing helper entry fails that account closed.
+
+Bitbucket accounts are currently added by editing `config.json`; the setup and
+config wizards preserve existing Bitbucket entries and include them in the
+AI-processing consent scope. Starting from the bundled full example, replace
+the two provider account fields with this Bitbucket-only account section:
+
+```json
+{
+  "configVersion": 6,
+  "githubAccounts": [],
+  "bitbucketAccounts": [{
+    "accountId": "{123e4567-e89b-42d3-a456-426614174000}",
+    "credentialUsername": "reviewer@example.com",
+    "repositories": ["workspace/repository"]
+  }]
+}
+```
+
+The account must appear in each pull request's Bitbucket **Reviewers** list.
+OpenMergeLens posts individual inline comments and a completion summary; it does
+not call Bitbucket's approval endpoint. `--dry-run` performs reads and reviewer
+execution but does not post comments or update state.
+Tracked Bitbucket entries may reconcile a completion comment after a failed
+state write, but they never trigger a new review or comment unless the stable
+reviewer UUID is present in the current discovery result. Before the first
+comment mutation, OpenMergeLens saves an immutable per-commit posting plan in
+the private state file; an interrupted retry reuses that exact plan. If the
+reviewer request is removed, the plan is retained for seven days so a renewed
+request can safely resume it. After that observed-unrequested window, the plan
+is retired into a terminal handled-head record: the plan quota is reclaimed,
+but that same head is not reviewed again for the 30-day terminal retention
+window, preventing duplicate partial posts. Terminal records are capped at
+10,000. If every slot is still within that window, an expired plan remains in
+its bounded posting-plan map until a terminal slot can be reclaimed rather than
+dropping the fail-closed same-head guard.
+Provider diffs that cannot fit safely in one reviewer prompt are covered as
+deterministic contiguous byte-range chunks, synthesized per chunk, and then
+merged in one bounded final pass. No diff bytes are silently truncated; an
+editable provider template may contain at most one `{{diff}}` placeholder.
+Bitbucket review prompts currently use the generated Codex or Claude backend;
+custom MCP-placeholder commands remain supported for GitHub configurations.
+To record consent after adding Bitbucket entries, run `openmergelens config`,
+choose **Reviewer backend**, reselect the current generated backend, and confirm
+the complete GitHub-plus-Bitbucket repository scope.
 
 ## Logs and diagnostics
 
