@@ -1,6 +1,6 @@
 {
   "name": "openmergelens",
-  "version": "1.5.2",
+  "version": "1.6.0",
   "description": "A local CLI that automates AI code reviews for GitHub pull requests using Codex, Claude Code, or any compatible MCP-enabled reviewer CLI.",
   "author": "Antonio Telimban Jr.",
   "license": "MIT",
