@@ -1967,23 +1967,31 @@ test('Windows retention lock accepts equal-index mixed-volume handle/path bindin
   assert.equal(names.includes('.openmergelens-retention.guard'), false);
 });
 
-test('Windows retention guard contenders retry while owner marker initialization is paused', async (t) => {
+test('Windows retention guard contenders retry when an owner releases during inspection', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-state-win-retention-guard-init-pause-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const guardPath = path.join(directory, '.openmergelens-retention.guard');
   await writeFile(guardPath, '');
-  const contender = saveState(path.join(directory, 'contender-state.json'), {}, {
+  let guardOpenAttempts = 0;
+  const openWithReleaseRace = async (...args) => {
+    if (args[0] === guardPath && ++guardOpenAttempts === 2) {
+      // O_EXCL observed the existing owner, then that owner released the
+      // marker before this contender could inspect it.
+      await rm(guardPath);
+      const error = new Error('simulated released guard');
+      error.code = 'ENOENT';
+      throw error;
+    }
+    return open(...args);
+  };
+  const result = await saveState(path.join(directory, 'contender-state.json'), {}, {
     platform: 'win32',
+    openFile: openWithReleaseRace,
     retentionLockRetryLimit: 200,
     retentionLockRetryDelayMs: 2,
   });
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  // Model the owner finishing initialization and releasing its marker. The
-  // contender must retry this empty in-progress marker rather than classifying
-  // it as a crashed owner.
-  await rm(guardPath);
-  const result = await contender;
   assert.equal(result.committed, true);
+  assert.equal(guardOpenAttempts >= 3, true);
   assert.equal((await readdir(directory)).includes('.openmergelens-retention.guard'), false);
 });
 

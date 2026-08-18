@@ -18,7 +18,7 @@ test('PRD config shape remains valid for the current validator', async () => {
 
   const example = JSON.parse(match[1]);
   const config = validateConfig(example);
-  assert.equal(config.configVersion, 5);
+  assert.equal(config.configVersion, 6);
   assert.equal(config.reviewerInputMode, 'stdin');
   assert.match(config.reviewerCommand, /\{\{mcp_config\}\}/u);
   assert.match(config.reviewerCommand, /\{\{mcp_tool\}\}/u);

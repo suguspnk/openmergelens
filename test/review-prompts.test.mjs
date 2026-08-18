@@ -38,6 +38,16 @@ test('prompt paths are shared by repository on one host and isolated across host
   );
 });
 
+test('Bitbucket prompt paths accept a valid Cloud workspace longer than a GitHub owner', async (t) => {
+  const home = await withHome(t);
+  const workspace = 'a'.repeat(62);
+
+  assert.equal(
+    reviewPromptPathFor('bitbucket.org', `${workspace}/repo`),
+    path.join(home, 'docs', 'review-prompts', 'bitbucket.org', workspace, 'repo.md'),
+  );
+});
+
 test('ensureReviewPrompt seeds once and never overwrites custom content', async (t) => {
   await withHome(t);
   const templatePath = path.join(process.env.OPENMERGELENS_HOME, 'template.md');

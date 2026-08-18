@@ -32,6 +32,25 @@ test('learnings are isolated by host, account, and repository', async (t) => {
   assert.equal(await readLearnings(personal, 'owner/repo'), '');
 });
 
+test('Bitbucket learnings paths accept a valid Cloud workspace longer than a GitHub owner', async (t) => {
+  const home = await createTestHome(t, 'openmergelens-bitbucket-learnings-');
+  setProcessTestHome(t, home);
+
+  const account = {
+    hostname: 'bitbucket.org',
+    accountId: '{123e4567-e89b-42d3-a456-426614174000}',
+    credentialUsername: 'reviewer@example.com',
+  };
+  const workspace = 'a'.repeat(62);
+  const filePath = await ensureLearningsFile(account, `${workspace}/repo`);
+
+  await writeFile(filePath, 'provider-specific correction\n');
+  assert.equal(
+    await readLearnings(account, `${workspace}/repo`),
+    'provider-specific correction\n',
+  );
+});
+
 test('read-only learnings reads do not create or harden local files', {
   skip: process.platform === 'win32',
 }, async (t) => {

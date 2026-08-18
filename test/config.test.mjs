@@ -8,6 +8,7 @@ import {
   accountKey,
   accountLabel,
   loadConfig,
+  normalizeBitbucketRepository,
   parseAccountSelector,
   saveConfig,
   validateConfig,
@@ -33,6 +34,26 @@ import {
 } from '../lib/ai-processing-consent.mjs';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+test('Bitbucket workspace validation allows Cloud’s 62-character limit without broadening GitHub owners', () => {
+  const workspace = `a${'b'.repeat(61)}`;
+  assert.equal(
+    normalizeBitbucketRepository(`${workspace}/repo`),
+    `${workspace}/repo`,
+  );
+  assert.throws(
+    () => validateConfig({
+      configVersion: 6,
+      githubAccounts: [{
+        hostname: 'github.com', username: 'reviewer', repositories: [`${workspace}/repo`],
+      }],
+      bitbucketAccounts: [],
+      aiProcessingConsent: createAiProcessingConsent('codex exec', []),
+      reviewerCommand: 'codex exec',
+    }),
+    /GitHub repository/u,
+  );
+});
 
 const validAccounts = [
   {
@@ -62,6 +83,8 @@ const validConfig = {
 test('validates and normalizes a version 5 multi-account config', () => {
   assert.deepEqual(validateConfig(validConfig), {
     ...validConfig,
+    configVersion: 6,
+    bitbucketAccounts: [],
     reviewTimeoutMs: DEFAULT_REVIEW_TIMEOUT_MS,
     model: null,
     githubAccounts: validConfig.githubAccounts,
@@ -69,6 +92,79 @@ test('validates and normalizes a version 5 multi-account config', () => {
     reviewerInputMode: 'stdin',
     desktopNotifications: true,
   });
+});
+
+test('version 6 accepts Bitbucket Cloud accounts and uses the stable account UUID key', () => {
+  const bitbucket = {
+    accountId: '{123e4567-e89b-42d3-a456-426614174000}',
+    credentialUsername: 'reviewer@example.com',
+    repositories: ['workspace/repo'],
+  };
+  const config = validateConfig({
+    ...validConfig,
+    configVersion: 6,
+    githubAccounts: [],
+    bitbucketAccounts: [bitbucket],
+    aiProcessingConsent: createAiProcessingConsent(
+      CODEX_REVIEWER_COMMAND,
+      [{ ...bitbucket, hostname: 'bitbucket.org' }],
+    ),
+  });
+  assert.equal(accountKey(config.bitbucketAccounts[0]), `bitbucket.org@${bitbucket.accountId}`);
+  assert.equal(accountLabel(config.bitbucketAccounts[0]), 'reviewer@example.com@bitbucket.org');
+  assert.equal(hasAiProcessingConsent(config), true);
+});
+
+test('Bitbucket Cloud config survives normalized save and strict reload without derived fields', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'openmergelens-bitbucket-config-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const configPath = path.join(directory, 'config.json');
+  const bitbucket = {
+    accountId: '{123e4567-e89b-42d3-a456-426614174000}',
+    credentialUsername: 'reviewer@example.com',
+    repositories: ['workspace/repo'],
+  };
+  const normalized = validateConfig({
+    ...validConfig,
+    configVersion: 6,
+    githubAccounts: [],
+    bitbucketAccounts: [bitbucket],
+    aiProcessingConsent: createAiProcessingConsent(
+      CODEX_REVIEWER_COMMAND,
+      [{ ...bitbucket, hostname: 'bitbucket.org' }],
+    ),
+  });
+
+  const saved = await saveConfig(configPath, normalized);
+  const persisted = JSON.parse(await readFile(configPath, 'utf8'));
+  const reloaded = await loadConfig(configPath);
+
+  assert.deepEqual(saved, normalized);
+  assert.equal(persisted.bitbucketAccounts[0].hostname, undefined);
+  assert.deepEqual(reloaded, normalized);
+  assert.throws(
+    () => validateConfig({
+      ...persisted,
+      bitbucketAccounts: [{ ...persisted.bitbucketAccounts[0], hostname: 'bitbucket.org' }],
+    }),
+    /unsupported field "hostname"/u,
+  );
+});
+
+test('Bitbucket fails closed for custom reviewer commands without a prompt-only contract', () => {
+  assert.throws(
+    () => validateConfig({
+      ...validConfig,
+      configVersion: 6,
+      bitbucketAccounts: [{
+        accountId: '{123e4567-e89b-42d3-a456-426614174000}',
+        credentialUsername: 'reviewer@example.com',
+        repositories: ['workspace/repo'],
+      }],
+      reviewerCommand: 'reviewer --mcp {{mcp_config}} --tool {{mcp_tool}}',
+    }),
+    /generated Codex or Claude/u,
+  );
 });
 
 test('accepts a manual reviewer timeout and defaults omitted values', () => {
@@ -290,7 +386,7 @@ test('version 3 configs migrate to the current schema with CLI defaults', () => 
     ...validConfig,
     configVersion: 3,
   });
-  assert.equal(migrated.configVersion, 5);
+  assert.equal(migrated.configVersion, 6);
   assert.equal(migrated.model, null);
 });
 
@@ -299,7 +395,7 @@ test('version 4 configs migrate to the current schema with timeout defaults', ()
     ...validConfig,
     configVersion: 4,
   });
-  assert.equal(migrated.configVersion, 5);
+  assert.equal(migrated.configVersion, 6);
   assert.equal(migrated.reviewTimeoutMs, DEFAULT_REVIEW_TIMEOUT_MS);
   assert.equal(
     validateConfig({
@@ -375,7 +471,7 @@ test('rejects legacy, global, empty, and duplicate account shapes', () => {
   );
   assert.throws(
     () => validateConfig({ ...validConfig, configVersion: 1 }),
-    /configVersion 5/,
+    /configVersion 6/,
   );
   assert.throws(
     () => validateConfig({ ...validConfig, searchScope: 'global' }),
@@ -383,7 +479,7 @@ test('rejects legacy, global, empty, and duplicate account shapes', () => {
   );
   assert.throws(
     () => validateConfig({ ...validConfig, githubAccounts: [] }),
-    /at least one account/,
+    /at least one GitHub or Bitbucket account/,
   );
   assert.throws(
     () => validateConfig({
@@ -487,7 +583,7 @@ test('AI-processing consent is one explicit config-wide scoped record', () => {
   );
 });
 
-test('version 2 repository consent migrates fail closed to version 5', () => {
+test('version 2 repository consent migrates fail closed to version 6', () => {
   const legacyConfig = {
     ...validConfig,
     configVersion: 2,
@@ -498,7 +594,7 @@ test('version 2 repository consent migrates fail closed to version 5', () => {
     })),
   };
   const fullyConsented = validateConfig(legacyConfig);
-  assert.equal(fullyConsented.configVersion, 5);
+  assert.equal(fullyConsented.configVersion, 6);
   assert.equal(hasAiProcessingConsent(fullyConsented), true);
   assert.equal(
     Object.hasOwn(fullyConsented.githubAccounts[0], 'aiProcessingConsent'),
