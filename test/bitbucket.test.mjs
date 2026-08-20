@@ -46,10 +46,11 @@ test('Bitbucket repository discovery rejects malformed metadata', async () => {
 
 test('Bitbucket REST boundary pins HTTPS, API host, and bounded API paths', async () => {
   let options;
+  let timeoutMs;
   const request = (supplied, callback) => {
     options = supplied;
     const req = new EventEmitter();
-    req.setTimeout = () => {};
+    req.setTimeout = (value) => { timeoutMs = value; };
     req.write = () => {};
     req.end = () => {
       const response = new PassThrough();
@@ -68,11 +69,87 @@ test('Bitbucket REST boundary pins HTTPS, API host, and bounded API paths', asyn
   assert.equal(options.protocol, 'https:');
   assert.equal(options.hostname, 'api.bitbucket.org');
   assert.equal(options.port, 443);
-  assert.match(options.headers.authorization, /^Basic /u);
+  assert.equal(options.family, 4);
+  assert.equal(options.method, 'GET');
+  assert.equal(
+    options.headers.authorization,
+    `Basic ${Buffer.from(`${auth.username}:${auth.password}`).toString('base64')}`,
+  );
+  assert.equal(timeoutMs, 15_000);
   assert.throws(
     () => bitbucketRequest({ auth, path: 'https://attacker.example/2.0/user', request }),
     /path is invalid/u,
   );
+});
+
+test('Bitbucket comment POST uses the IPv4 boundary once with one serialized body', async () => {
+  const suppliedOptions = [];
+  const writes = [];
+  let timeoutMs;
+  const request = (options, callback) => {
+    suppliedOptions.push(options);
+    const req = new EventEmitter();
+    req.setTimeout = (value) => { timeoutMs = value; };
+    req.write = (value) => { writes.push(value); };
+    req.end = () => {
+      const response = new PassThrough();
+      response.statusCode = 201;
+      response.headers = {};
+      callback(response);
+      response.end('{"id":42}');
+    };
+    req.destroy = (error) => req.emit('error', error);
+    return req;
+  };
+  const body = { content: { raw: 'review comment' } };
+  assert.deepEqual(await bitbucketRequest({
+    auth,
+    method: 'POST',
+    path: '/2.0/repositories/workspace/repo/pullrequests/7/comments',
+    body,
+    request,
+  }), { id: 42 });
+  assert.equal(suppliedOptions.length, 1);
+  assert.equal(suppliedOptions[0].family, 4);
+  assert.equal(suppliedOptions[0].protocol, 'https:');
+  assert.equal(suppliedOptions[0].hostname, 'api.bitbucket.org');
+  assert.equal(suppliedOptions[0].port, 443);
+  assert.equal(suppliedOptions[0].method, 'POST');
+  assert.equal(timeoutMs, 15_000);
+  assert.equal(writes.length, 1);
+  assert.deepEqual(JSON.parse(writes[0].toString('utf8')), body);
+});
+
+test('Bitbucket POST timeout and request errors never replay the mutation', async (t) => {
+  for (const failure of ['timeout', 'error']) await t.test(failure, async () => {
+    let requests = 0;
+    let writes = 0;
+    let timeoutHandler;
+    const request = () => {
+      requests += 1;
+      const req = new EventEmitter();
+      req.setTimeout = (_value, handler) => { timeoutHandler = handler; };
+      req.write = () => { writes += 1; };
+      req.destroy = (error) => req.emit('error', error);
+      req.end = () => {
+        if (failure === 'timeout') timeoutHandler();
+        else req.emit('error', new Error('socket failed'));
+      };
+      return req;
+    };
+    await assert.rejects(
+      bitbucketRequest({
+        auth,
+        method: 'POST',
+        path: '/2.0/repositories/workspace/repo/pullrequests/7/comments',
+        body: { content: { raw: 'review comment' } },
+        request,
+      }),
+      failure === 'timeout' ? /timed out/u : /socket failed/u,
+    );
+    assert.equal(requests, 1);
+    assert.equal(writes, 1);
+  });
 });
 
 function interruptedBitbucketRequest() {

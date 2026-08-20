@@ -4,6 +4,8 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Fixed Bitbucket Cloud API timeouts on hosts with unusable IPv6 routes by
+  selecting IPv4 at the shared HTTPS request boundary for reads and writes.
 - Added interactive Bitbucket Cloud account and repository discovery to both
   `openmergelens init` and `openmergelens config`, including credential-backed
   UUID verification and searchable member-repository selection.
