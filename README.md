@@ -156,6 +156,8 @@ This will:
    actually authenticated (not just installed). Bitbucket requires the
    generated Codex or Claude backend. GitHub-only setup may instead use a
    compatible custom reviewer command. Codex runs in ephemeral, read-only mode.
+   For a generated backend, choose its model and reasoning/thinking effort (or
+   keep either setting at the CLI default) before configuring provider accounts.
 3. For GitHub, list authenticated `gh` accounts. For Bitbucket Cloud, ask for
    the exact username of a stored noninteractive `bitbucket.org` Git credential,
    verify it with `/2.0/user`, and derive the stable braced account UUID. You
@@ -165,29 +167,28 @@ This will:
    multi-select. Every account must explicitly watch at least one repository.
    Watching a repository enables requested-review discovery; it does not add a
    reviewer to a pull request automatically.
-5. Seed shared prompts under
-   `~/.openmergelens/docs/review-prompts/<host>/<owner>/<repo>.md`. Learnings
-   are account-specific: GitHub uses
-   `~/.openmergelens/docs/learnings/<host>/<username>/<owner>/<repo>.md`, while
-   Bitbucket uses
-   `~/.openmergelens/docs/learnings/bitbucket.org/<account-uuid>/<workspace>/<repo>.md`.
-   Existing files are never overwritten.
-6. For a built-in backend, choose a current model from the backend catalog or
-   enter a model ID, then choose its reasoning/thinking effort (or keep each
-   setting at the CLI default). Custom commands use their own model settings.
-7. Require one explicit consent for the complete selected repository set
+5. Require one explicit consent for the complete selected repository set
    before source code, pull-request content, or personal data can be processed
    by the selected third-party AI provider. Declining leaves setup unchanged.
-8. Ask how many independent review focus categories to run per PR. The
+6. Ask how many independent review focus categories to run per PR. The
    recommended choice runs all four categories plus synthesis; lower choices
    reduce reviewer calls by skipping later categories.
-9. Ask whether completed polls should show desktop notifications (enabled by
-   default). After setup is applied, send a test notification, confirm that it
-   appeared, and show platform-specific recovery steps if the operating system
-   suppresses it.
-10. Offer one schedule for the complete multi-account poller.
-11. Preview the config, deterministic review-file paths, and schedule, then ask
-   once before applying them.
+7. Ask whether completed polls should show desktop notifications (enabled by
+   default).
+8. Offer one schedule for the complete multi-account poller.
+9. Preview the config, deterministic review-file paths, and schedule, then ask
+   once before applying them. Declining leaves the config and review files
+   unchanged.
+10. After confirmation, seed shared prompts under
+    `~/.openmergelens/docs/review-prompts/<host>/<owner>/<repo>.md`. Learnings
+    are account-specific: GitHub uses
+    `~/.openmergelens/docs/learnings/<host>/<username>/<owner>/<repo>.md`, while
+    Bitbucket uses
+    `~/.openmergelens/docs/learnings/bitbucket.org/<account-uuid>/<workspace>/<repo>.md`.
+    Existing files are never overwritten. The wizard then saves the config,
+    applies the selected schedule, and, when notifications are enabled, sends a
+    test notification with platform-specific recovery guidance if it is
+    suppressed.
 
 Cancelling before the final confirmation leaves the config and review files
 unchanged.
