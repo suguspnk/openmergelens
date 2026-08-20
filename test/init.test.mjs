@@ -320,6 +320,22 @@ test('reviewer backend selector always keeps the custom command option', () => {
   );
 });
 
+test('reviewer backend selector excludes custom commands when Bitbucket is selected', () => {
+  assert.deepEqual(
+    reviewerBackendOptions([
+      { id: 'claude', label: 'Claude Code', status: 'ready' },
+      { id: 'codex', label: 'Codex CLI', status: 'not-found' },
+    ], { allowCustom: false }).map(({ value }) => value),
+    ['claude'],
+  );
+  assert.deepEqual(
+    reviewerBackendOptions([
+      { id: 'claude', label: 'Claude Code', status: 'not-found' },
+    ], { allowCustom: false }),
+    [],
+  );
+});
+
 test('reviewer auth re-check accepts the same backend after login succeeds', async () => {
   const selectedAgent = {
     id: 'codex',

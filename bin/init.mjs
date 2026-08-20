@@ -212,19 +212,6 @@ async function main() {
       required: true,
     });
     if (p.isCancel(providers)) exitCancelled();
-    const githubAccounts = providers.includes('github')
-      ? await configureGitHubAccounts({
-        existingAccounts: existingConfig?.githubAccounts || [],
-        onCancel: exitCancelled,
-      })
-      : [];
-    const bitbucketAccounts = providers.includes('bitbucket')
-      ? await configureBitbucketAccounts({
-        existingAccounts: existingConfig?.bitbucketAccounts || [],
-        onCancel: exitCancelled,
-      })
-      : [];
-
     const agentSpinner = p.spinner();
     agentSpinner.start('Checking known reviewer CLIs');
     let agents;
@@ -236,7 +223,17 @@ async function main() {
     }
     agentSpinner.stop('Done checking reviewer CLIs');
 
-    const agentOptions = reviewerBackendOptions(agents);
+    const includesBitbucket = providers.includes('bitbucket');
+    const agentOptions = reviewerBackendOptions(agents, {
+      allowCustom: !includesBitbucket,
+    });
+    if (agentOptions.length === 0) {
+      p.log.error(
+        'Bitbucket Cloud requires the generated Codex or Claude reviewer backend. ' +
+        'Install and authenticate one of those CLIs before continuing.',
+      );
+      exitCancelled();
+    }
 
     const backendChoice = await p.select({
       message: 'Which shared reviewer backend should all accounts use?',
@@ -300,6 +297,19 @@ async function main() {
         onCancel: exitCancelled,
       })
       : null;
+
+    const githubAccounts = providers.includes('github')
+      ? await configureGitHubAccounts({
+        existingAccounts: existingConfig?.githubAccounts || [],
+        onCancel: exitCancelled,
+      })
+      : [];
+    const bitbucketAccounts = includesBitbucket
+      ? await configureBitbucketAccounts({
+        existingAccounts: existingConfig?.bitbucketAccounts || [],
+        onCancel: exitCancelled,
+      })
+      : [];
 
     // Consent covers the complete selected repository set only after the user
     // evaluates one specific shared reviewer backend. A backend change can

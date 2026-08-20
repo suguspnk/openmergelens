@@ -325,6 +325,14 @@ ${providerSelection}
   }
   timeout { exit 19 }
 }
+expect {
+  -re {Which shared reviewer backend should} { send "\\r" }
+  timeout { exit 22 }
+}
+expect {
+  -re {Which .* model should review PRs} { send "\\r" }
+  timeout { exit 23 }
+}
 ${accountSelection}
 expect {
   -re {${provider === 'bitbucket' && bitbucketAccountCount() === 2
@@ -346,14 +354,6 @@ ${provider === 'bitbucket' && bitbucketAccountCount() === 2 ? `expect {
   }
   timeout { exit 25 }
 }` : ''}
-expect {
-  -re {Which shared reviewer backend should} { send "\\r" }
-  timeout { exit 22 }
-}
-expect {
-  -re {Which .* model should review PRs} { send "\\r" }
-  timeout { exit 23 }
-}
 expect {
   -re {Authorize third-party AI processing} { send "y" }
   timeout { exit 24 }

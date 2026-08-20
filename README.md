@@ -93,18 +93,19 @@ Before running anything, make sure you have:
    ```bash
    node --version
    ```
-2. **GitHub CLI (`gh`), authenticated**
+2. **For GitHub repositories: GitHub CLI (`gh`), authenticated**
    ```bash
    gh auth status
    ```
    If this fails, run `gh auth login` first. Multiple authenticated accounts,
-   including accounts on different GitHub hosts, can run together.
+   including accounts on different GitHub hosts, can run together. A
+   Bitbucket-only setup does not require `gh`.
 3. **A reviewer CLI**, already logged in on its own: pick one:
    - [Claude Code](https://claude.com/claude-code): `claude /login`
    - [Codex CLI](https://github.com/openai/codex): `codex login`
-   - A custom CLI that can read a prompt from stdin, print text/JSON to
-     stdout, attach a per-run MCP server, and restrict access to the named MCP
-     inspection tool.
+   - For GitHub-only configurations, a custom CLI that can read a prompt from
+     stdin, print text/JSON to stdout, attach a per-run MCP server, and restrict
+     access to the named MCP inspection tool.
 
 ## Install
 
@@ -149,37 +150,43 @@ openmergelens init
 ```
 
 This will:
-1. List every account authenticated in `gh` and ask which complete set of
-   accounts should watch for requested reviews and post reviews. Existing
-   configured accounts are preselected. The wizard explains that a PR must be
-   in GitHub's **Reviewers** list for the selected account; the request may be
-   manual or supplied by `CODEOWNERS`.
-2. For each account, show every accessible repository as a searchable
-   multi-select. Every account must explicitly watch at least one repository;
-   there is no global-search mode. Watching a repository only enables the
-   requested-review search; it does not request reviews automatically.
-3. Seed one shared prompt per GitHub host/repository and one independent
-   learnings file per host/account/repository. Existing files are never
-   overwritten.
-4. Detect Claude Code / Codex on your `PATH` and check whether each is
-   actually authenticated (not just installed). You can also enter a custom
-   reviewer command instead. Codex runs in ephemeral, read-only mode and
-   accepts the prompt-only review workspace without requiring a Git checkout.
-5. For a built-in backend, choose a current model from the backend catalog or
+1. Ask whether to configure GitHub, Bitbucket Cloud, or both. Fresh setup
+   defaults to GitHub; Bitbucket-only setup works without `gh`.
+2. Detect Claude Code / Codex on your `PATH` and check whether each is
+   actually authenticated (not just installed). Bitbucket requires the
+   generated Codex or Claude backend. GitHub-only setup may instead use a
+   compatible custom reviewer command. Codex runs in ephemeral, read-only mode.
+3. For GitHub, list authenticated `gh` accounts. For Bitbucket Cloud, ask for
+   the exact username of a stored noninteractive `bitbucket.org` Git credential,
+   verify it with `/2.0/user`, and derive the stable braced account UUID. You
+   can add multiple Bitbucket accounts; existing configured accounts are
+   preselected and reverified.
+4. For every retained account, show accessible repositories as a searchable
+   multi-select. Every account must explicitly watch at least one repository.
+   Watching a repository enables requested-review discovery; it does not add a
+   reviewer to a pull request automatically.
+5. Seed shared prompts under
+   `~/.openmergelens/docs/review-prompts/<host>/<owner>/<repo>.md`. Learnings
+   are account-specific: GitHub uses
+   `~/.openmergelens/docs/learnings/<host>/<username>/<owner>/<repo>.md`, while
+   Bitbucket uses
+   `~/.openmergelens/docs/learnings/bitbucket.org/<account-uuid>/<workspace>/<repo>.md`.
+   Existing files are never overwritten.
+6. For a built-in backend, choose a current model from the backend catalog or
    enter a model ID, then choose its reasoning/thinking effort (or keep each
    setting at the CLI default). Custom commands use their own model settings.
-6. Require one explicit consent for the complete selected repository set
+7. Require one explicit consent for the complete selected repository set
    before source code, pull-request content, or personal data can be processed
    by the selected third-party AI provider. Declining leaves setup unchanged.
-7. Ask how many independent review focus categories to run per PR. The
+8. Ask how many independent review focus categories to run per PR. The
    recommended choice runs all four categories plus synthesis; lower choices
    reduce reviewer calls by skipping later categories.
-8. Ask whether completed polls should show desktop notifications (enabled by
+9. Ask whether completed polls should show desktop notifications (enabled by
    default). After setup is applied, send a test notification, confirm that it
    appeared, and show platform-specific recovery steps if the operating system
    suppresses it.
-9. Offer one schedule for the complete multi-account poller.
-10. Preview the config, deterministic review-file paths, and schedule, then ask
+10. Offer one schedule for the complete multi-account poller.
+11. Preview the config, deterministic review-file paths, and schedule, then ask
    once before applying them.
 
 Cancelling before the final confirmation leaves the config and review files
@@ -196,10 +203,14 @@ openmergelens config
 The editor groups accounts and repositories, reviewer backend and model, review
 behavior, notifications, and scheduling. Each completed change is validated
 and saved immediately, then the menu remains open for another change. Account
-and repository edits reuse GitHub authentication and accessible-repository
-selection; newly watched repositories get missing prompt and learnings files
-without overwriting existing files. Removed watches stop being polled but keep
-their files. Schedule changes reconcile the installed cron, launchd, or Windows
+and repository edits reuse the provider-specific authentication and searchable
+repository selection. You can edit or remove either provider's watches while
+preserving the other provider; the last configured provider account cannot be
+removed. Bitbucket edits require a generated Codex or Claude backend, and a
+configuration containing Bitbucket watches cannot switch to a custom backend.
+Newly watched repositories get missing prompt and learnings files without
+overwriting existing files. Removed watches stop being polled but keep their
+files. Schedule changes reconcile the installed cron, launchd, or Windows
 Task Scheduler entry immediately; the scheduler choice and interval remain
 operational state outside `config.json`.
 

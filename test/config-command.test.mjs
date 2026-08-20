@@ -5,9 +5,12 @@ import { fileURLToPath } from 'node:url';
 import {
   configMenuOptions,
   configLoadErrorMessage,
+  editAccounts,
+  editReviewer,
   persistConfigUpdate,
   removeProviderAccounts,
   replaceProviderAccounts,
+  reviewerOptionsWithCurrent,
   reviewBehaviorMenuOptions,
 } from '../lib/config-editor.mjs';
 import {
@@ -195,6 +198,69 @@ test('provider removal rejects the last total account and cancellation or consen
   assert.equal(saves, 0);
   assert.deepEqual(cancelled.config, mixed);
   assert.deepEqual(declined.config, mixed);
+});
+
+test('Bitbucket account edits stop before credentials, consent, files, or saves for a custom backend', async () => {
+  const incompatible = {
+    ...createBitbucketConfig(),
+    reviewerCommand: 'custom --mcp {{mcp_config}} --tool {{mcp_tool}}',
+    model: null,
+  };
+  const calls = { credentials: 0, consent: 0, files: 0, saves: 0 };
+  const result = await editAccounts(incompatible, {
+    prompts: {
+      select: async () => 'bitbucket',
+      isCancel: () => false,
+      log: { error: () => {}, warn: () => {} },
+    },
+    configureBitbucket: async () => { calls.credentials += 1; return []; },
+    updateConsent: async () => { calls.consent += 1; },
+    ensureReviewFiles: async () => { calls.files += 1; },
+    saveUpdate: async () => { calls.saves += 1; },
+  });
+  assert.equal(result, incompatible);
+  assert.deepEqual(calls, { credentials: 0, consent: 0, files: 0, saves: 0 });
+});
+
+test('Bitbucket configurations cannot switch to custom while GitHub-only custom remains supported', async () => {
+  const bitbucketConfig = createBitbucketConfig();
+  const bitbucketCalls = { text: 0, consent: 0, saves: 0 };
+  const bitbucketResult = await editReviewer(bitbucketConfig, {
+    detect: async () => [{ id: 'claude', label: 'Claude Code', status: 'ready' }],
+    prompts: {
+      select: async ({ options }) => {
+        assert.equal(options.some(({ value }) => value === 'custom'), false);
+        return 'custom';
+      },
+      text: async () => { bitbucketCalls.text += 1; },
+      isCancel: () => false,
+      log: { error: () => {}, warn: () => {} },
+    },
+    updateConsent: async () => { bitbucketCalls.consent += 1; },
+    saveUpdate: async () => { bitbucketCalls.saves += 1; },
+  });
+  assert.equal(bitbucketResult, bitbucketConfig);
+  assert.deepEqual(bitbucketCalls, { text: 0, consent: 0, saves: 0 });
+  assert.equal(reviewerOptionsWithCurrent([], bitbucketConfig).some(({ value }) => value === 'custom'), false);
+
+  const githubConfig = createConfig();
+  const customCommand = 'custom --mcp {{mcp_config}} --tool {{mcp_tool}}';
+  const githubResult = await editReviewer(githubConfig, {
+    detect: async () => [],
+    prompts: {
+      select: async ({ options }) => {
+        assert.equal(options.some(({ value }) => value === 'custom'), true);
+        return 'custom';
+      },
+      text: async () => customCommand,
+      isCancel: () => false,
+      log: { error: () => {}, warn: () => {} },
+    },
+    updateConsent: async (_current, candidate) => candidate,
+    saveUpdate: async (_current, candidate) => candidate,
+  });
+  assert.equal(githubResult.reviewerCommand, customCommand);
+  assert.equal(githubResult.model, null);
 });
 
 test('config validation failures keep the existing file untouched and explain recovery', async () => {
