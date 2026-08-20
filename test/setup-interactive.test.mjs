@@ -110,3 +110,51 @@ test('retained Bitbucket accounts are verified before repository selection', asy
   );
   assert.equal(repoPrompted, false);
 });
+
+test('Bitbucket account configuration rejects an empty repository result after prompting', async () => {
+  const existing = {
+    hostname: 'bitbucket.org',
+    accountId: '{123e4567-e89b-42d3-a456-426614174000}',
+    credentialUsername: 'reviewer@example.com',
+    repositories: ['Workspace/Repo'],
+  };
+  const prompts = quietPrompts(async ({ message }) =>
+    message.startsWith('Which Bitbucket Cloud accounts') ? [existing.accountId] : []);
+  await assert.rejects(
+    configureBitbucketAccounts({
+      existingAccounts: [existing],
+      prompts,
+      resolveAuth: async () => ({ username: existing.credentialUsername, password: 'fixture' }),
+      listRepos: async () => [{ nameWithOwner: 'Workspace/Repo', isPrivate: true }],
+    }),
+    /Select at least one repository/u,
+  );
+});
+
+test('Bitbucket account configuration rejects a newly discovered duplicate UUID', async () => {
+  const existing = {
+    hostname: 'bitbucket.org',
+    accountId: '{123e4567-e89b-42d3-a456-426614174000}',
+    credentialUsername: 'reviewer@example.com',
+    repositories: ['Workspace/Repo'],
+  };
+  const prompts = quietPrompts(
+    async ({ message, options }) => message.startsWith('Which Bitbucket Cloud accounts')
+      ? [existing.accountId, options.at(-1).value]
+      : ['Workspace/Repo'],
+    async () => 'duplicate@example.com',
+  );
+  await assert.rejects(
+    configureBitbucketAccounts({
+      existingAccounts: [existing],
+      prompts,
+      resolveAuth: async () => ({ username: existing.credentialUsername, password: 'fixture' }),
+      discoverAccount: async () => ({
+        account: { ...existing, credentialUsername: 'duplicate@example.com' },
+        auth: { username: 'duplicate@example.com', password: 'fixture' },
+      }),
+      listRepos: async () => { throw new Error('must not list repositories'); },
+    }),
+    /already selected/u,
+  );
+});

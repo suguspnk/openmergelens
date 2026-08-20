@@ -9,7 +9,7 @@ const schedulerModes = ['manual', ...(process.platform === 'darwin' || process.p
   ? ['installed']
   : [])];
 
-function runScenario(backend, schedulerMode) {
+function runScenario(backend, schedulerMode, provider = 'github') {
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
@@ -20,6 +20,7 @@ function runScenario(backend, schedulerMode) {
           ...process.env,
           OPENMERGELENS_E2E_INIT_BACKEND: backend,
           OPENMERGELENS_E2E_INIT_SCHEDULER: schedulerMode,
+          OPENMERGELENS_E2E_INIT_PROVIDER: provider,
         },
         stdio: 'inherit',
       },
@@ -41,5 +42,13 @@ for (const backend of backends) {
       console.error(`could not start ${backend} init E2E (${schedulerMode}): ${error.message}`);
     }
   }
+}
+console.error('\n=== interactive init E2E: claude, manual scheduler, Bitbucket only ===');
+try {
+  const result = await runScenario('claude', 'manual', 'bitbucket');
+  if (result.signal || result.code !== 0) failed = true;
+} catch (error) {
+  failed = true;
+  console.error(`could not start Bitbucket-only init E2E: ${error.message}`);
 }
 process.exitCode = failed ? 1 : 0;
