@@ -134,8 +134,62 @@ test('Bitbucket discovery enforces one aggregate page budget across workspaces',
         : { values: [], next: `https://api.bitbucket.org${url.pathname}?page=2` };
     },
   }), (error) => error.cause?.message ===
-    'Bitbucket repository discovery exceeded the aggregate page limit');
+    'Bitbucket repository discovery exceeded the aggregate page limit' &&
+    /repository discovery failed for workspace.*aggregate page limit exceeded/u.test(error.message));
   assert.equal(calls, 112);
+});
+
+test('Bitbucket discovery exposes bounded safe operational failure details', async (t) => {
+  await t.test('timeout', async () => {
+    const cause = new Error('Bitbucket API request timed out');
+    await assert.rejects(listAccessibleBitbucketRepos({
+      auth,
+      api: async () => { throw cause; },
+    }), (error) => error.cause === cause &&
+      error.message === 'Bitbucket workspace discovery failed: request timed out');
+  });
+  await t.test('unsafe repository pagination', async () => {
+    await assert.rejects(listAccessibleBitbucketRepos({
+      auth,
+      api: async ({ path }) => path.includes('user/workspaces')
+        ? { values: [{ workspace: { slug: 'Workspace' } }] }
+        : {
+          values: [],
+          next: 'https://attacker.example/2.0/repositories/Workspace?page=2',
+        },
+    }), (error) => error.message ===
+      'Bitbucket repository discovery failed for workspace "Workspace": unsafe pagination URL');
+  });
+  for (const [name, code, detail] of [
+    ['DNS', 'ENOTFOUND', 'DNS lookup failed (ENOTFOUND)'],
+    ['socket', 'ECONNRESET', 'network request failed (ECONNRESET)'],
+  ]) await t.test(name, async () => {
+    const cause = Object.assign(new Error('untrusted transport diagnostics'), { code });
+    await assert.rejects(listAccessibleBitbucketRepos({
+      auth,
+      api: async () => { throw cause; },
+    }), (error) => error.cause === cause && error.message.endsWith(detail) &&
+      !error.message.includes('untrusted transport diagnostics'));
+  });
+  await t.test('ordinary HTTP status', async () => {
+    const cause = Object.assign(new Error('provider body must not render'), { status: 500 });
+    await assert.rejects(listAccessibleBitbucketRepos({
+      auth,
+      api: async () => { throw cause; },
+    }), (error) => error.status === 500 && error.cause === cause &&
+      error.message === 'Bitbucket workspace discovery failed: HTTP 500');
+  });
+  await t.test('arbitrary provider error', async () => {
+    const secret = 'Bearer fixture-secret-shaped-value';
+    const cause = new Error(`${secret}\n${'x'.repeat(2_000)}`);
+    await assert.rejects(listAccessibleBitbucketRepos({
+      auth,
+      api: async () => { throw cause; },
+    }), (error) => error.cause === cause &&
+      error.message === 'Bitbucket workspace discovery failed: unexpected provider error' &&
+      !error.message.includes(secret) && !/[\r\n]/u.test(error.message) &&
+      error.message.length < 100);
+  });
 });
 
 test('Bitbucket discovery reports scope and stale-workspace status without response data', async (t) => {
