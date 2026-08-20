@@ -99,6 +99,7 @@ if (args[0] === 'auth' && args[1] === 'status') {
   );
 
   let bitbucketPreloadPath;
+  let bitbucketApiLog;
   if (provider === 'bitbucket') {
     await writeExecutable(
       path.join(binDirectory, 'git'),
@@ -123,7 +124,9 @@ if (args[0] !== 'credential' || args[1] !== 'fill') {
 `,
     );
     bitbucketPreloadPath = path.join(root, 'mock-bitbucket-https.cjs');
-    await writeFile(bitbucketPreloadPath, `const https = require('node:https');
+    bitbucketApiLog = path.join(root, 'bitbucket-api-requests.log');
+    await writeFile(bitbucketPreloadPath, `const fs = require('node:fs');
+const https = require('node:https');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 https.request = (options, callback) => {
@@ -132,6 +135,15 @@ https.request = (options, callback) => {
   request.write = () => {};
   request.destroy = (error) => { if (error) request.emit('error', error); };
   request.end = () => {
+    const username = Buffer.from(options.headers.authorization.slice(6), 'base64').toString().split(':')[0];
+    fs.appendFileSync(process.env.FAKE_BITBUCKET_API_LOG, JSON.stringify({
+      path: options.path,
+      username,
+    }) + '\\n');
+    if (options.path === '/2.0/repositories?role=member&pagelen=50&sort=full_name') {
+      request.emit('error', new Error('obsolete account-wide Bitbucket repository endpoint'));
+      return;
+    }
     const response = new PassThrough();
     response.statusCode = 200;
     response.headers = {};
@@ -140,13 +152,13 @@ https.request = (options, callback) => {
       response.statusCode = 500;
       body = '{}';
     } else if (options.path === '/2.0/user') {
-      const username = Buffer.from(options.headers.authorization.slice(6), 'base64').toString().split(':')[0];
       body = JSON.stringify({
         uuid: username === '${BITBUCKET_USERNAME_2}' ? '${BITBUCKET_ACCOUNT_ID_2}' : '${BITBUCKET_ACCOUNT_ID}',
         display_name: 'E2E Reviewer',
       });
-    } else if (options.path === '/2.0/repositories?role=member&pagelen=50&sort=full_name') {
-      const username = Buffer.from(options.headers.authorization.slice(6), 'base64').toString().split(':')[0];
+    } else if (options.path === '/2.0/user/workspaces?pagelen=50') {
+      body = JSON.stringify({ values: [{ workspace: { slug: 'Workspace' } }] });
+    } else if (options.path === '/2.0/repositories/Workspace?role=member&pagelen=50&sort=full_name') {
       body = JSON.stringify({ values: [{
         full_name: username === '${BITBUCKET_USERNAME_2}' ? '${BITBUCKET_REPOSITORY_2}' : '${BITBUCKET_REPOSITORY}',
         is_private: true,
@@ -242,8 +254,10 @@ if (args[0] === '-l' && !fs.existsSync(process.env.FAKE_CRONTAB_STATE)) {
       FAKE_CRONTAB_STATE: crontabState,
       ...(bitbucketPreloadPath ? {
         NODE_OPTIONS: `--require=${bitbucketPreloadPath}`,
+        FAKE_BITBUCKET_API_LOG: bitbucketApiLog,
       } : {}),
     },
+    bitbucketApiLog,
     schedulerLog,
   };
 }
@@ -524,6 +538,31 @@ test(
       if (bitbucketAccountCount() === 2) {
         assert.match(result.stdout, /reviewer-two@example\.com@bitbucket\.org/u);
       }
+      const apiRequests = (await readFile(fake.bitbucketApiLog, 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      const repositoryPath =
+        '/2.0/repositories/Workspace?role=member&pagelen=50&sort=full_name';
+      const expectedRequests = bitbucketAccountCount() === 2
+        ? [
+          { path: '/2.0/user', username: BITBUCKET_USERNAME },
+          { path: '/2.0/user', username: BITBUCKET_USERNAME_2 },
+          { path: '/2.0/user/workspaces?pagelen=50', username: BITBUCKET_USERNAME },
+          { path: repositoryPath, username: BITBUCKET_USERNAME },
+          { path: '/2.0/user/workspaces?pagelen=50', username: BITBUCKET_USERNAME_2 },
+          { path: repositoryPath, username: BITBUCKET_USERNAME_2 },
+        ]
+        : [
+          { path: '/2.0/user', username: BITBUCKET_USERNAME },
+          { path: '/2.0/user/workspaces?pagelen=50', username: BITBUCKET_USERNAME },
+          { path: repositoryPath, username: BITBUCKET_USERNAME },
+        ];
+      assert.deepEqual(apiRequests, expectedRequests);
+      assert.equal(
+        apiRequests.some(({ path: requestPath }) => requestPath.startsWith('/2.0/repositories?')),
+        false,
+      );
     }
     assert.equal(config.desktopNotifications, false);
     assert.equal(config.reviewerCommand.includes(backend), true);
