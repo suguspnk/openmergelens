@@ -6,6 +6,7 @@ import {
   configMenuOptions,
   configLoadErrorMessage,
   persistConfigUpdate,
+  removeProviderAccounts,
   replaceProviderAccounts,
   reviewBehaviorMenuOptions,
 } from '../lib/config-editor.mjs';
@@ -140,6 +141,60 @@ test('provider account edits preserve the other provider until it is explicitly 
     () => replaceProviderAccounts(withGitHub, 'gitlab', []),
     /unknown repository provider/u,
   );
+});
+
+test('provider removal preserves the other provider and saves the consented result', async () => {
+  const bitbucketConfig = createBitbucketConfig();
+  const mixed = replaceProviderAccounts(bitbucketConfig, 'github', [{
+    hostname: 'github.com', username: 'alice', repositories: ['OWNER/REPO'],
+  }]);
+  for (const provider of ['github', 'bitbucket']) {
+    const saves = [];
+    const result = await removeProviderAccounts(mixed, provider, {
+      confirmRemoval: async () => true,
+      updateConsent: async (_current, candidate) => ({
+        ...candidate,
+        aiProcessingConsent: { renewed: provider },
+      }),
+      saveUpdate: async (_current, candidate) => {
+        saves.push(candidate);
+        return candidate;
+      },
+    });
+    assert.equal(result.changed, true);
+    assert.equal(result.config[`${provider}Accounts`].length, 0);
+    const otherProvider = provider === 'github' ? 'bitbucket' : 'github';
+    assert.deepEqual(result.config[`${otherProvider}Accounts`], mixed[`${otherProvider}Accounts`]);
+    assert.equal(saves.length, 1);
+  }
+});
+
+test('provider removal rejects the last total account and cancellation or consent decline never save', async () => {
+  const onlyBitbucket = createBitbucketConfig();
+  let saves = 0;
+  const lastAccount = await removeProviderAccounts(onlyBitbucket, 'bitbucket', {
+    confirmRemoval: async () => true,
+    saveUpdate: async () => { saves += 1; },
+  });
+  assert.equal(lastAccount.reason, 'last-account');
+
+  const mixed = replaceProviderAccounts(onlyBitbucket, 'github', [{
+    hostname: 'github.com', username: 'alice', repositories: ['OWNER/REPO'],
+  }]);
+  const cancelled = await removeProviderAccounts(mixed, 'github', {
+    confirmRemoval: async () => false,
+    saveUpdate: async () => { saves += 1; },
+  });
+  assert.equal(cancelled.reason, 'cancelled');
+  const declined = await removeProviderAccounts(mixed, 'github', {
+    confirmRemoval: async () => true,
+    updateConsent: async () => null,
+    saveUpdate: async () => { saves += 1; },
+  });
+  assert.equal(declined.reason, 'consent-declined');
+  assert.equal(saves, 0);
+  assert.deepEqual(cancelled.config, mixed);
+  assert.deepEqual(declined.config, mixed);
 });
 
 test('config validation failures keep the existing file untouched and explain recovery', async () => {

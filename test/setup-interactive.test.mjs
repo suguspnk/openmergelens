@@ -6,10 +6,15 @@ import {
   initialProviderSelections,
 } from '../lib/setup-interactive.mjs';
 
-function quietPrompts(autocompleteMultiselect, text = async () => '') {
+function quietPrompts(
+  autocompleteMultiselect,
+  text = async () => '',
+  select = async () => 'done',
+) {
   return {
     autocompleteMultiselect,
     text,
+    select,
     isCancel: () => false,
     log: { success: () => {} },
     spinner: () => ({ start: () => {}, stop: () => {} }),
@@ -157,4 +162,100 @@ test('Bitbucket account configuration rejects a newly discovered duplicate UUID'
     }),
     /already selected/u,
   );
+});
+
+test('Bitbucket account configuration can discover two fresh accounts before repo selection', async () => {
+  const usernames = ['first@example.com', 'second@example.com'];
+  const ids = [
+    '{123e4567-e89b-42d3-a456-426614174000}',
+    '{223e4567-e89b-42d3-a456-426614174000}',
+  ];
+  let textIndex = 0;
+  let actionIndex = 0;
+  let repoPromptIndex = 0;
+  const prompts = quietPrompts(
+    async ({ message, options }) => message.startsWith('Which Bitbucket Cloud accounts')
+      ? [options.at(-1).value]
+      : [`Workspace/Repo${++repoPromptIndex}`],
+    async () => usernames[textIndex++],
+    async () => ['add', 'done'][actionIndex++],
+  );
+  const accounts = await configureBitbucketAccounts({
+    prompts,
+    discoverAccount: async (username) => {
+      const index = usernames.indexOf(username);
+      return {
+        account: {
+          hostname: 'bitbucket.org',
+          accountId: ids[index],
+          credentialUsername: username,
+        },
+        auth: { username, password: `fixture-${index}` },
+      };
+    },
+    listRepos: async ({ auth }) => [{
+      nameWithOwner: `Workspace/Repo${usernames.indexOf(auth.username) + 1}`,
+      isPrivate: true,
+    }],
+  });
+  assert.deepEqual(accounts.map(({ accountId, credentialUsername, repositories }) => ({
+    accountId,
+    credentialUsername,
+    repositories,
+  })), [
+    { accountId: ids[0], credentialUsername: usernames[0], repositories: ['Workspace/Repo1'] },
+    { accountId: ids[1], credentialUsername: usernames[1], repositories: ['Workspace/Repo2'] },
+  ]);
+  assert.equal(JSON.stringify(accounts).includes('fixture-'), false);
+});
+
+test('Bitbucket repeated add rejects a duplicate UUID on a later discovery', async () => {
+  const accountId = '{123e4567-e89b-42d3-a456-426614174000}';
+  let textIndex = 0;
+  const prompts = quietPrompts(
+    async ({ options }) => [options.at(-1).value],
+    async () => ['first@example.com', 'duplicate@example.com'][textIndex++],
+    async () => 'add',
+  );
+  await assert.rejects(
+    configureBitbucketAccounts({
+      prompts,
+      discoverAccount: async (username) => ({
+        account: { hostname: 'bitbucket.org', accountId, credentialUsername: username },
+        auth: { username, password: 'fixture' },
+      }),
+      listRepos: async () => { throw new Error('must not list repositories'); },
+    }),
+    /already selected/u,
+  );
+});
+
+test('cancelling the repeated Bitbucket add prompt aborts before repository discovery', async () => {
+  const cancelled = Symbol('cancelled');
+  let listed = false;
+  const prompts = {
+    ...quietPrompts(
+      async ({ options }) => [options.at(-1).value],
+      async () => 'first@example.com',
+      async () => cancelled,
+    ),
+    isCancel: (value) => value === cancelled,
+  };
+  await assert.rejects(
+    configureBitbucketAccounts({
+      prompts,
+      onCancel: () => { throw cancelled; },
+      discoverAccount: async (username) => ({
+        account: {
+          hostname: 'bitbucket.org',
+          accountId: '{123e4567-e89b-42d3-a456-426614174000}',
+          credentialUsername: username,
+        },
+        auth: { username, password: 'fixture' },
+      }),
+      listRepos: async () => { listed = true; return []; },
+    }),
+    (error) => error === cancelled,
+  );
+  assert.equal(listed, false);
 });

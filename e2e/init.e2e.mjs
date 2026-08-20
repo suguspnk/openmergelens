@@ -18,6 +18,13 @@ const FIXTURE_REPOSITORY = 'owner/repo';
 const BITBUCKET_ACCOUNT_ID = '{123e4567-e89b-42d3-a456-426614174000}';
 const BITBUCKET_USERNAME = 'reviewer@example.com';
 const BITBUCKET_REPOSITORY = 'Workspace/Repo';
+const BITBUCKET_ACCOUNT_ID_2 = '{223e4567-e89b-42d3-a456-426614174000}';
+const BITBUCKET_USERNAME_2 = 'reviewer-two@example.com';
+const BITBUCKET_REPOSITORY_2 = 'Workspace/RepoTwo';
+
+function bitbucketAccountCount() {
+  return process.env.OPENMERGELENS_E2E_BITBUCKET_ACCOUNTS === '2' ? 2 : 1;
+}
 
 function selectedProvider() {
   const provider = (process.env.OPENMERGELENS_E2E_INIT_PROVIDER || 'github')
@@ -104,12 +111,13 @@ if (args[0] !== 'credential' || args[1] !== 'fill') {
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', (chunk) => (input += chunk));
   process.stdin.on('end', () => {
-    if (!input.includes('host=bitbucket.org') || !input.includes('username=${BITBUCKET_USERNAME}')) {
+    const username = input.match(/^username=(.+)$/m)?.[1];
+    if (!input.includes('host=bitbucket.org') || !['${BITBUCKET_USERNAME}', '${BITBUCKET_USERNAME_2}'].includes(username)) {
       process.stderr.write('unexpected credential request\\n');
       process.exitCode = 2;
       return;
     }
-    process.stdout.write('username=${BITBUCKET_USERNAME}\\npassword=fixture-token\\n');
+    process.stdout.write('username=' + username + '\\npassword=fixture-token\\n');
   });
 }
 `,
@@ -132,9 +140,17 @@ https.request = (options, callback) => {
       response.statusCode = 500;
       body = '{}';
     } else if (options.path === '/2.0/user') {
-      body = JSON.stringify({ uuid: '${BITBUCKET_ACCOUNT_ID}', display_name: 'E2E Reviewer' });
+      const username = Buffer.from(options.headers.authorization.slice(6), 'base64').toString().split(':')[0];
+      body = JSON.stringify({
+        uuid: username === '${BITBUCKET_USERNAME_2}' ? '${BITBUCKET_ACCOUNT_ID_2}' : '${BITBUCKET_ACCOUNT_ID}',
+        display_name: 'E2E Reviewer',
+      });
     } else if (options.path === '/2.0/repositories?role=member&pagelen=50&sort=full_name') {
-      body = JSON.stringify({ values: [{ full_name: '${BITBUCKET_REPOSITORY}', is_private: true }] });
+      const username = Buffer.from(options.headers.authorization.slice(6), 'base64').toString().split(':')[0];
+      body = JSON.stringify({ values: [{
+        full_name: username === '${BITBUCKET_USERNAME_2}' ? '${BITBUCKET_REPOSITORY_2}' : '${BITBUCKET_REPOSITORY}',
+        is_private: true,
+      }] });
     } else {
       response.statusCode = 404;
       body = '{}';
@@ -255,6 +271,19 @@ function expectScript({ schedulerDownCount, installedScheduler, provider }) {
   const providerSelection = provider === 'bitbucket'
     ? '    send " "\n    send "\\033\\[B"\n    send " "\n    send "\\r"'
     : '    send "\\r"';
+  const repeatBitbucketAccountSelection = bitbucketAccountCount() === 2
+    ? '    send "\\033\\[B"\n    send "\\r"'
+    : '    send "\\r"';
+  const secondBitbucketAccountSelection = bitbucketAccountCount() === 2
+    ? `expect {
+  -re {Bitbucket credential username} { send "${BITBUCKET_USERNAME_2}\\r" }
+  timeout { exit 23 }
+}
+expect {
+  -re {Add another Bitbucket Cloud account} { send "\\r" }
+  timeout { exit 24 }
+}`
+    : '';
   const accountSelection = provider === 'bitbucket'
     ? `expect {
   -re {Which Bitbucket Cloud accounts should watch} {
@@ -269,7 +298,14 @@ function expectScript({ schedulerDownCount, installedScheduler, provider }) {
 expect {
   -re {Bitbucket credential username} { send "${BITBUCKET_USERNAME}\\r" }
   timeout { exit 21 }
-}`
+}
+expect {
+  -re {Add another Bitbucket Cloud account} {
+${repeatBitbucketAccountSelection}
+  }
+  timeout { exit 22 }
+}
+${secondBitbucketAccountSelection}`
     : `expect {
   -re {Which GitHub accounts should watch} {
     after 100
@@ -291,7 +327,9 @@ ${providerSelection}
 }
 ${accountSelection}
 expect {
-  -re {Which repositories should} {
+  -re {${provider === 'bitbucket' && bitbucketAccountCount() === 2
+    ? 'Which repositories should reviewer@example.com'
+    : 'Which repositories should'}} {
     after 100
     ${provider === 'bitbucket'
     ? 'after 300\n    send "\\033\\[Z"\n    after 300\n    send "\\r"'
@@ -299,6 +337,15 @@ expect {
   }
   timeout { exit 21 }
 }
+${provider === 'bitbucket' && bitbucketAccountCount() === 2 ? `expect {
+  -re {Which repositories should reviewer-two@example.com} {
+    after 300
+    send "\\033\\[Z"
+    after 300
+    send "\\r"
+  }
+  timeout { exit 25 }
+}` : ''}
 expect {
   -re {Which shared reviewer backend should} { send "\\r" }
   timeout { exit 22 }
@@ -457,15 +504,26 @@ test(
       }]);
     } else {
       assert.deepEqual(config.githubAccounts, []);
-      assert.deepEqual(config.bitbucketAccounts, [{
+      const expectedAccounts = [{
         accountId: BITBUCKET_ACCOUNT_ID,
         credentialUsername: BITBUCKET_USERNAME,
         repositories: [BITBUCKET_REPOSITORY],
-      }]);
-      assert.deepEqual(Object.keys(config.bitbucketAccounts[0]).sort(), [
-        'accountId', 'credentialUsername', 'repositories',
-      ]);
+      }];
+      if (bitbucketAccountCount() === 2) expectedAccounts.push({
+        accountId: BITBUCKET_ACCOUNT_ID_2,
+        credentialUsername: BITBUCKET_USERNAME_2,
+        repositories: [BITBUCKET_REPOSITORY_2],
+      });
+      assert.deepEqual(config.bitbucketAccounts, expectedAccounts);
+      for (const account of config.bitbucketAccounts) {
+        assert.deepEqual(Object.keys(account).sort(), [
+          'accountId', 'credentialUsername', 'repositories',
+        ]);
+      }
       assert.match(result.stdout, /reviewer@example\.com@bitbucket\.org/u);
+      if (bitbucketAccountCount() === 2) {
+        assert.match(result.stdout, /reviewer-two@example\.com@bitbucket\.org/u);
+      }
     }
     assert.equal(config.desktopNotifications, false);
     assert.equal(config.reviewerCommand.includes(backend), true);
