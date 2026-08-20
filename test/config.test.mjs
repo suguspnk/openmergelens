@@ -9,6 +9,7 @@ import {
   accountLabel,
   loadConfig,
   normalizeBitbucketRepository,
+  normalizeBitbucketWorkspace,
   parseAccountSelector,
   saveConfig,
   validateConfig,
@@ -53,6 +54,17 @@ test('Bitbucket workspace validation allows Cloud’s 62-character limit without
     }),
     /GitHub repository/u,
   );
+});
+
+test('Bitbucket workspace normalization is strict and preserves canonical API spelling', () => {
+  const workspace = `a${'b'.repeat(61)}`;
+  assert.equal(normalizeBitbucketWorkspace(workspace), workspace);
+  assert.equal(normalizeBitbucketWorkspace('Workspace_Name'), 'Workspace_Name');
+  assert.equal(normalizeBitbucketWorkspace(' workspace '), 'workspace');
+  for (const invalid of ['', '-workspace', 'workspace.', `a${'b'.repeat(62)}`]) {
+    assert.throws(() => normalizeBitbucketWorkspace(invalid), /workspace/u);
+  }
+  assert.throws(() => normalizeBitbucketWorkspace(null), /must be a string/u);
 });
 
 const validAccounts = [

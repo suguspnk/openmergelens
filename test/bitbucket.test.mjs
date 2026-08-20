@@ -28,23 +28,141 @@ test('Bitbucket repository discovery returns canonical searchable member reposit
     auth,
     api: async ({ path }) => {
       calls.push(path);
-      return {
-        values: [{ full_name: 'Workspace/Repo', is_private: true }],
-      };
+      if (path === '/2.0/user/workspaces?pagelen=50') {
+        return { values: [
+          { workspace: { slug: 'Workspace' } },
+          { workspace: { slug: 'workspace' } },
+        ] };
+      }
+      return { values: [{ full_name: 'Workspace/Repo', is_private: true }] };
     },
   });
-  assert.deepEqual(calls, ['/2.0/repositories?role=member&pagelen=50&sort=full_name']);
+  assert.deepEqual(calls, [
+    '/2.0/user/workspaces?pagelen=50',
+    '/2.0/repositories/Workspace?role=member&pagelen=50&sort=full_name',
+  ]);
   assert.deepEqual(repos, [{ nameWithOwner: 'Workspace/Repo', isPrivate: true }]);
+  assert.equal(calls.some((path) => path.startsWith('/2.0/repositories?')), false);
 });
 
 test('Bitbucket repository discovery rejects malformed metadata', async () => {
   await assert.rejects(
     listAccessibleBitbucketRepos({
       auth,
-      api: async () => ({ values: [{ full_name: 'missing-slash' }] }),
+      api: async ({ path }) => path.includes('user/workspaces')
+        ? { values: [{ workspace: { slug: 'Workspace' } }] }
+        : { values: [{ full_name: 'missing-slash' }] },
     }),
     /repository response is malformed/u,
   );
+});
+
+test('Bitbucket repository discovery rejects malformed, foreign, and conflicting results', async (t) => {
+  for (const [name, repositories, pattern] of [
+    ['foreign owner', [{ full_name: 'Other/Repo', is_private: true }], /foreign/u],
+    ['conflicting duplicate', [
+      { full_name: 'Workspace/Repo', is_private: true },
+      { full_name: 'workspace/repo', is_private: true },
+    ], /conflicting/u],
+  ]) await t.test(name, async () => {
+    await assert.rejects(listAccessibleBitbucketRepos({
+      auth,
+      api: async ({ path }) => path.includes('user/workspaces')
+        ? { values: [{ workspace: { slug: 'Workspace' } }] }
+        : { values: repositories },
+    }), pattern);
+  });
+  await assert.rejects(listAccessibleBitbucketRepos({
+    auth,
+    api: async () => ({ values: [{ workspace: { slug: ' workspace ' } }] }),
+  }), /workspace response is malformed/u);
+});
+
+test('Bitbucket workspace and repository discovery enforce collection caps', async (t) => {
+  await t.test('workspace value cap', async () => {
+    await assert.rejects(listAccessibleBitbucketRepos({
+      auth,
+      api: async () => ({
+        values: Array.from({ length: 101 }, (_, index) => ({
+          workspace: { slug: `workspace${index}` },
+        })),
+      }),
+    }), (error) => error.cause?.message === 'Bitbucket API pagination exceeded the value limit');
+  });
+  await t.test('repository value cap', async () => {
+    await assert.rejects(listAccessibleBitbucketRepos({
+      auth,
+      api: async ({ path }) => path.includes('user/workspaces')
+        ? { values: [{ workspace: { slug: 'Workspace' } }] }
+        : {
+          values: Array.from({ length: 501 }, (_, index) => ({
+            full_name: `Workspace/repo${index}`,
+            is_private: true,
+          })),
+        },
+    }), (error) => error.cause?.message === 'Bitbucket API pagination exceeded the value limit');
+  });
+  await t.test('ten-page collection cap', async () => {
+    let page = 0;
+    await assert.rejects(listAccessibleBitbucketRepos({
+      auth,
+      api: async ({ path }) => {
+        page += 1;
+        return { values: [], next: `https://api.bitbucket.org/2.0/user/workspaces?page=${page + 1}` };
+      },
+    }), (error) => error.cause?.message === 'Bitbucket API pagination exceeded the page limit');
+    assert.equal(page, 10);
+  });
+});
+
+test('Bitbucket discovery enforces one aggregate page budget across workspaces', async () => {
+  let calls = 0;
+  await assert.rejects(listAccessibleBitbucketRepos({
+    auth,
+    api: async ({ path }) => {
+      calls += 1;
+      if (path.includes('user/workspaces')) {
+        return {
+          values: Array.from({ length: 100 }, (_, index) => ({
+            workspace: { slug: `workspace${String(index).padStart(3, '0')}` },
+          })),
+        };
+      }
+      const url = new URL(`https://api.bitbucket.org${path}`);
+      return url.searchParams.has('page')
+        ? { values: [] }
+        : { values: [], next: `https://api.bitbucket.org${url.pathname}?page=2` };
+    },
+  }), (error) => error.cause?.message ===
+    'Bitbucket repository discovery exceeded the aggregate page limit');
+  assert.equal(calls, 112);
+});
+
+test('Bitbucket discovery reports scope and stale-workspace status without response data', async (t) => {
+  const statusError = (status) => Object.assign(new Error('raw provider response'), { status });
+  await t.test('workspace 403', async () => {
+    await assert.rejects(listAccessibleBitbucketRepos({
+      auth,
+      api: async () => { throw statusError(403); },
+    }), (error) => error.status === 403 && error.cause?.status === 403 &&
+      /read:workspace:bitbucket.*recreate/u.test(error.message) &&
+      !error.message.includes('raw provider response'));
+  });
+  for (const status of [403, 404, 410]) await t.test(`repository ${status}`, async () => {
+    await assert.rejects(listAccessibleBitbucketRepos({
+      auth,
+      api: async ({ path }) => {
+        if (path.includes('user/workspaces')) {
+          return { values: [{ workspace: { slug: 'Workspace' } }] };
+        }
+        throw statusError(status);
+      },
+    }), (error) => error.status === status && error.cause?.status === status &&
+      (status === 403
+        ? /Workspace.*read:repository:bitbucket/u.test(error.message)
+        : /Workspace.*configuration was not changed/u.test(error.message)) &&
+      !error.message.includes('raw provider response'));
+  });
 });
 
 test('Bitbucket lookup prefers IPv4 while preserving IPv4-only and IPv6-only resolution', async (t) => {

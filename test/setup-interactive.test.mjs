@@ -116,6 +116,34 @@ test('retained Bitbucket accounts are verified before repository selection', asy
   assert.equal(repoPrompted, false);
 });
 
+test('Bitbucket discovery failure stops before repository selection', async () => {
+  const existing = {
+    hostname: 'bitbucket.org',
+    accountId: '{123e4567-e89b-42d3-a456-426614174000}',
+    credentialUsername: 'reviewer@example.com',
+    repositories: ['Workspace/Repo'],
+  };
+  let repoPrompted = false;
+  const prompts = quietPrompts(async ({ message }) => {
+    if (message.startsWith('Which Bitbucket Cloud accounts')) return [existing.accountId];
+    repoPrompted = true;
+    return ['Workspace/Repo'];
+  });
+  await assert.rejects(configureBitbucketAccounts({
+    existingAccounts: [existing],
+    prompts,
+    resolveAuth: async () => ({ username: existing.credentialUsername, password: 'fixture' }),
+    listRepos: async () => {
+      const error = new Error(
+        'Bitbucket workspace "Workspace" is unavailable (HTTP 410); configuration was not changed',
+      );
+      error.status = 410;
+      throw error;
+    },
+  }), /configuration was not changed/u);
+  assert.equal(repoPrompted, false);
+});
+
 test('Bitbucket account configuration rejects an empty repository result after prompting', async () => {
   const existing = {
     hostname: 'bitbucket.org',

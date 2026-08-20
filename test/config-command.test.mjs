@@ -122,6 +122,30 @@ test('config editor preserves normalized Bitbucket accounts through an unrelated
   assert.equal(writes.length, 1);
 });
 
+test('Bitbucket discovery failure prevents consent, review files, and config save', async () => {
+  const currentConfig = createBitbucketConfig();
+  const calls = { consent: 0, files: 0, saves: 0 };
+  let promptIndex = 0;
+  await assert.rejects(editAccounts(currentConfig, {
+    prompts: {
+      select: async () => ['bitbucket', 'edit'][promptIndex++],
+      isCancel: () => false,
+      log: { error: () => {} },
+    },
+    configureBitbucket: async () => {
+      const error = new Error(
+        'Bitbucket workspace "Workspace" is unavailable (HTTP 410); configuration was not changed',
+      );
+      error.status = 410;
+      throw error;
+    },
+    updateConsent: async () => { calls.consent += 1; },
+    ensureReviewFiles: async () => { calls.files += 1; },
+    saveUpdate: async () => { calls.saves += 1; },
+  }), /configuration was not changed/u);
+  assert.deepEqual(calls, { consent: 0, files: 0, saves: 0 });
+});
+
 test('provider account edits preserve the other provider until it is explicitly edited', () => {
   const bitbucketConfig = createBitbucketConfig();
   const githubAccount = {

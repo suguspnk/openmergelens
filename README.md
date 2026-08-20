@@ -164,7 +164,10 @@ This will:
    can add multiple Bitbucket accounts; existing configured accounts are
    preselected and reverified.
 4. For every retained account, show accessible repositories as a searchable
-   multi-select. Every account must explicitly watch at least one repository.
+   multi-select. Bitbucket first lists the authenticated user's workspaces, then
+   lists member repositories within each workspace; it never falls back to the
+   deprecated account-wide repository endpoint. Every account must explicitly
+   watch at least one repository.
    Watching a repository enables requested-review discovery; it does not add a
    reviewer to a pull request automatically.
 5. Require one explicit consent for the complete selected repository set
@@ -279,6 +282,15 @@ password=<Bitbucket Cloud API token>
 Enter the same username when the wizard asks for the Bitbucket credential
 username. OpenMergeLens never prompts during a poll: a missing helper entry fails
 that account closed.
+
+Create the Bitbucket Cloud API token with these exact permission scopes:
+`read:user`, `read:workspace`, `read:repository`, `read:pullrequest`, and
+`write:pullrequest` (required for posting reviews). Older tokens that
+lack `read:workspace` can return HTTP 403 during setup; recreate the
+token with all five scopes and rerun `openmergelens init` or
+`openmergelens config`. A repository HTTP 404 or 410 means the selected
+workspace is no longer discoverable; the wizard leaves the existing
+configuration unchanged.
 
 Manual JSON configuration remains available as an alternative. Obtain `accountId`
 from the authenticated Bitbucket Cloud `GET https://api.bitbucket.org/2.0/user`

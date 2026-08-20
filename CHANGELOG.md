@@ -4,6 +4,9 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Changed Bitbucket Cloud repository discovery to enumerate the authenticated
+  user's workspaces before listing member repositories, with bounded pagination
+  and actionable recovery for missing workspace or repository token scopes.
 - Fixed Bitbucket Cloud API timeouts on dual-stack hosts with unusable IPv6
   routes by preferring IPv4 for each HTTPS request while retaining IPv6-only
   network support.
