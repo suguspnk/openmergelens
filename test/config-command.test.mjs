@@ -6,6 +6,7 @@ import {
   configMenuOptions,
   configLoadErrorMessage,
   persistConfigUpdate,
+  replaceProviderAccounts,
   reviewBehaviorMenuOptions,
 } from '../lib/config-editor.mjs';
 import {
@@ -115,6 +116,30 @@ test('config editor preserves normalized Bitbucket accounts through an unrelated
   assert.equal(changed.config.reviewBatchSize, 2);
   assert.deepEqual(changed.config.bitbucketAccounts, currentConfig.bitbucketAccounts);
   assert.equal(writes.length, 1);
+});
+
+test('provider account edits preserve the other provider until it is explicitly edited', () => {
+  const bitbucketConfig = createBitbucketConfig();
+  const githubAccount = {
+    hostname: 'github.com',
+    username: 'alice',
+    repositories: ['OWNER/REPO'],
+  };
+  const withGitHub = replaceProviderAccounts(bitbucketConfig, 'github', [githubAccount]);
+  assert.deepEqual(withGitHub.githubAccounts, [githubAccount]);
+  assert.deepEqual(withGitHub.bitbucketAccounts, bitbucketConfig.bitbucketAccounts);
+
+  const replacementBitbucket = [{
+    ...bitbucketConfig.bitbucketAccounts[0],
+    repositories: ['workspace/other'],
+  }];
+  const withBitbucket = replaceProviderAccounts(withGitHub, 'bitbucket', replacementBitbucket);
+  assert.deepEqual(withBitbucket.githubAccounts, [githubAccount]);
+  assert.deepEqual(withBitbucket.bitbucketAccounts, replacementBitbucket);
+  assert.throws(
+    () => replaceProviderAccounts(withGitHub, 'gitlab', []),
+    /unknown repository provider/u,
+  );
 });
 
 test('config validation failures keep the existing file untouched and explain recovery', async () => {

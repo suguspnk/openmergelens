@@ -238,11 +238,15 @@ After running the command for the package manager you used, copy
 committed to a repo. It stores hostnames and usernames, never tokens. Each poll
 retrieves every selected GitHub account's token from the GitHub CLI credential store.
 For Bitbucket Cloud, configure a noninteractive HTTPS credential in Git's credential
-store for `bitbucket.org` and the exact `credentialUsername` first, for example with
-your platform credential helper; OpenMergeLens invokes `git credential fill` and
-never writes the returned token to config, state, logs, reviewer arguments, or the
-reviewer environment. Each poll verifies that `/2.0/user` returns the configured
-`accountId`. The reviewer never receives provider credentials. For GitHub,
+store for `bitbucket.org` first, then select **Bitbucket Cloud** in
+`openmergelens init` or under **Accounts & repositories** in
+`openmergelens config`. Enter the exact credential username; the wizard verifies
+the credential with `/2.0/user`, derives the stable account UUID, and lets you
+search and select accessible member repositories. OpenMergeLens invokes
+`git credential fill` and never writes the returned token to config, state, logs,
+reviewer arguments, or the reviewer environment. Each poll verifies that
+`/2.0/user` still returns the configured `accountId`. The reviewer never receives
+provider credentials. For GitHub,
 OpenMergeLens exposes one
 temporary structured inspection tool backed by a per-review local gateway
 that permits only GET operations for the fixed PR and its repository. The
@@ -260,15 +264,15 @@ username=reviewer@example.com
 password=<Bitbucket Cloud API token>
 ```
 
-Use the same username in `credentialUsername`. Obtain `accountId` from the
-authenticated Bitbucket Cloud `GET https://api.bitbucket.org/2.0/user` response;
-copy its `uuid` exactly, including braces. OpenMergeLens never prompts during a
-poll: a missing helper entry fails that account closed.
+Enter the same username when the wizard asks for the Bitbucket credential
+username. OpenMergeLens never prompts during a poll: a missing helper entry fails
+that account closed.
 
-Bitbucket accounts are currently added by editing `config.json`; the setup and
-config wizards preserve existing Bitbucket entries and include them in the
-AI-processing consent scope. Starting from the bundled full example, replace
-the two provider account fields with this Bitbucket-only account section:
+Manual JSON configuration remains available as an alternative. Obtain `accountId`
+from the authenticated Bitbucket Cloud `GET https://api.bitbucket.org/2.0/user`
+response and copy its `uuid` exactly, including braces. Starting from the bundled
+full example, replace the two provider account fields with this Bitbucket-only
+account section:
 
 ```json
 {
@@ -305,9 +309,8 @@ merged in one bounded final pass. No diff bytes are silently truncated; an
 editable provider template may contain at most one `{{diff}}` placeholder.
 Bitbucket review prompts currently use the generated Codex or Claude backend;
 custom MCP-placeholder commands remain supported for GitHub configurations.
-To record consent after adding Bitbucket entries, run `openmergelens config`,
-choose **Reviewer backend**, reselect the current generated backend, and confirm
-the complete GitHub-plus-Bitbucket repository scope.
+The setup and config wizards include the complete GitHub-plus-Bitbucket repository
+scope when they request renewed AI-processing consent.
 
 ## Logs and diagnostics
 

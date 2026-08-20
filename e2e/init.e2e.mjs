@@ -186,6 +186,13 @@ log_user 1
 set stty_init "rows 40 columns 120"
 spawn "${nodePath}" "${escapedInitPath}"
 expect {
+  -re {Which repository providers should OpenMergeLens configure} {
+    after 100
+    send "\r"
+  }
+  timeout { exit 19 }
+}
+expect {
   -re {Which GitHub accounts should watch} {
     after 100
     send "\\r"

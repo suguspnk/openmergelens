@@ -7,6 +7,7 @@ import {
   bitbucketReviewAlreadyPosted,
   createBitbucketReviewMarker,
   getBitbucketPullRequest,
+  listAccessibleBitbucketRepos,
   postBitbucketReview,
   prepareBitbucketReview,
   searchBitbucketReviewRequestedPRs,
@@ -17,6 +18,31 @@ const account = {
   accountId: '{123e4567-e89b-42d3-a456-426614174000}',
 };
 const auth = { ...account, username: 'reviewer@example.com', password: 'secret' };
+
+test('Bitbucket repository discovery returns canonical searchable member repositories', async () => {
+  const calls = [];
+  const repos = await listAccessibleBitbucketRepos({
+    auth,
+    api: async ({ path }) => {
+      calls.push(path);
+      return {
+        values: [{ full_name: 'Workspace/Repo', is_private: true }],
+      };
+    },
+  });
+  assert.deepEqual(calls, ['/2.0/repositories?role=member&pagelen=50&sort=full_name']);
+  assert.deepEqual(repos, [{ nameWithOwner: 'Workspace/Repo', isPrivate: true }]);
+});
+
+test('Bitbucket repository discovery rejects malformed metadata', async () => {
+  await assert.rejects(
+    listAccessibleBitbucketRepos({
+      auth,
+      api: async () => ({ values: [{ full_name: 'missing-slash' }] }),
+    }),
+    /repository response is malformed/u,
+  );
+});
 
 test('Bitbucket REST boundary pins HTTPS, API host, and bounded API paths', async () => {
   let options;
