@@ -284,9 +284,10 @@ username. OpenMergeLens never prompts during a poll: a missing helper entry fail
 that account closed.
 
 Create the Bitbucket Cloud API token with these exact permission scopes:
-`read:user`, `read:workspace`, `read:repository`, `read:pullrequest`, and
-`write:pullrequest` (required for posting reviews). Older tokens that
-lack `read:workspace` can return HTTP 403 during setup; recreate the
+`read:user:bitbucket`, `read:workspace:bitbucket`,
+`read:repository:bitbucket`, `read:pullrequest:bitbucket`, and
+`write:pullrequest:bitbucket` (required for posting reviews). Older tokens that
+lack `read:workspace:bitbucket` can return HTTP 403 during setup; recreate the
 token with all five scopes and rerun `openmergelens init` or
 `openmergelens config`. A repository HTTP 404 or 410 means the selected
 workspace is no longer discoverable; the wizard leaves the existing
