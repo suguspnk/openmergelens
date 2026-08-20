@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { ADDRCONFIG } from 'node:dns';
 import { EventEmitter } from 'node:events';
+import { createServer, request as httpRequest } from 'node:http';
 import { PassThrough } from 'node:stream';
 import {
   bitbucketRequest,
@@ -46,20 +48,21 @@ test('Bitbucket repository discovery rejects malformed metadata', async () => {
 });
 
 test('Bitbucket lookup prefers IPv4 while preserving IPv4-only and IPv6-only resolution', async (t) => {
-  const resolve = (records, failure) => new Promise((resolveAddress, rejectAddress) => {
+  const requestOptions = { all: true, family: 0, hints: ADDRCONFIG };
+  const resolve = (records, failure) => new Promise((resolveAddresses, rejectAddresses) => {
     const lookup = (hostname, options, callback) => {
       assert.equal(hostname, 'api.bitbucket.org');
-      assert.deepEqual(options, { all: false, order: 'ipv4first' });
+      assert.deepEqual(options, { ...requestOptions, order: 'ipv4first' });
       if (failure) {
         callback(failure);
         return;
       }
-      const selected = records.find(({ family }) => family === 4) || records[0];
-      callback(null, selected.address, selected.family);
+      const ordered = [...records].sort((left, right) => left.family - right.family);
+      callback(null, ordered);
     };
-    bitbucketLookup('api.bitbucket.org', { family: 0 }, (error, address, family) => {
-      if (error) rejectAddress(error);
-      else resolveAddress({ address, family });
+    bitbucketLookup('api.bitbucket.org', requestOptions, (error, addresses) => {
+      if (error) rejectAddresses(error);
+      else resolveAddresses(addresses);
     }, lookup);
   });
 
@@ -67,21 +70,94 @@ test('Bitbucket lookup prefers IPv4 while preserving IPv4-only and IPv6-only res
     assert.deepEqual(await resolve([
       { address: '2001:db8::1', family: 6 },
       { address: '192.0.2.1', family: 4 },
-    ]), { address: '192.0.2.1', family: 4 });
+    ]), [
+      { address: '192.0.2.1', family: 4 },
+      { address: '2001:db8::1', family: 6 },
+    ]);
   });
   await t.test('IPv6-only remains usable', async () => {
     assert.deepEqual(await resolve([
       { address: '2001:db8::1', family: 6 },
-    ]), { address: '2001:db8::1', family: 6 });
+    ]), [{ address: '2001:db8::1', family: 6 }]);
   });
   await t.test('IPv4-only remains usable', async () => {
     assert.deepEqual(await resolve([
       { address: '192.0.2.1', family: 4 },
-    ]), { address: '192.0.2.1', family: 4 });
+    ]), [{ address: '192.0.2.1', family: 4 }]);
   });
   await t.test('DNS errors fail closed', async () => {
     await assert.rejects(resolve([], new Error('DNS failed')), /DNS failed/u);
   });
+});
+
+test('one request falls back from IPv4 to an IPv6-only loopback server without replaying its body', async (t) => {
+  const payload = JSON.stringify({ content: { raw: 'review comment' } });
+  let serverRequests = 0;
+  let receivedBody = '';
+  const server = createServer((request, response) => {
+    serverRequests += 1;
+    request.setEncoding('utf8');
+    request.on('data', (chunk) => { receivedBody += chunk; });
+    request.on('end', () => {
+      response.writeHead(201, { 'content-type': 'application/json' });
+      response.end('{"id":42}');
+    });
+  });
+  try {
+    await new Promise((resolveListen, rejectListen) => {
+      server.once('error', rejectListen);
+      server.listen({ host: '::1', port: 0, ipv6Only: true }, resolveListen);
+    });
+  } catch (error) {
+    if (error?.code === 'EAFNOSUPPORT' || error?.code === 'EADDRNOTAVAIL') {
+      t.skip('IPv6 loopback is unavailable on this host');
+      return;
+    }
+    throw error;
+  }
+  t.after(() => new Promise((resolveClose) => server.close(resolveClose)));
+
+  let wrapperCalls = 0;
+  let resolverCalls = 0;
+  let clientWrites = 0;
+  const resolver = (hostname, options, callback) => {
+    resolverCalls += 1;
+    assert.equal(hostname, 'fallback.test');
+    assert.equal(options.all, true);
+    assert.equal(options.order, 'ipv4first');
+    callback(null, [
+      { address: '127.0.0.1', family: 4 },
+      { address: '::1', family: 6 },
+    ]);
+  };
+  const lookup = (hostname, options, callback) => {
+    wrapperCalls += 1;
+    return bitbucketLookup(hostname, options, callback, resolver);
+  };
+  const responseBody = await new Promise((resolveResponse, rejectResponse) => {
+    const request = httpRequest({
+      hostname: 'fallback.test',
+      port: server.address().port,
+      method: 'POST',
+      lookup,
+      autoSelectFamily: true,
+    }, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => resolveResponse(Buffer.concat(chunks).toString('utf8')));
+    });
+    request.on('error', rejectResponse);
+    clientWrites += 1;
+    request.write(payload);
+    request.end();
+  });
+
+  assert.equal(responseBody, '{"id":42}');
+  assert.equal(wrapperCalls, 1);
+  assert.equal(resolverCalls, 1);
+  assert.equal(clientWrites, 1);
+  assert.equal(serverRequests, 1);
+  assert.equal(receivedBody, payload);
 });
 
 test('Bitbucket REST boundary pins HTTPS, API host, and bounded API paths', async () => {
@@ -111,7 +187,7 @@ test('Bitbucket REST boundary pins HTTPS, API host, and bounded API paths', asyn
   assert.equal(options.port, 443);
   assert.equal('family' in options, false);
   assert.equal(options.lookup, bitbucketLookup);
-  assert.equal(options.autoSelectFamily, false);
+  assert.equal(options.autoSelectFamily, true);
   assert.equal(options.method, 'GET');
   assert.equal(
     options.headers.authorization,
@@ -154,7 +230,7 @@ test('Bitbucket comment POST uses the IPv4-first boundary once with one serializ
   assert.equal(suppliedOptions.length, 1);
   assert.equal('family' in suppliedOptions[0], false);
   assert.equal(suppliedOptions[0].lookup, bitbucketLookup);
-  assert.equal(suppliedOptions[0].autoSelectFamily, false);
+  assert.equal(suppliedOptions[0].autoSelectFamily, true);
   assert.equal(suppliedOptions[0].protocol, 'https:');
   assert.equal(suppliedOptions[0].hostname, 'api.bitbucket.org');
   assert.equal(suppliedOptions[0].port, 443);
