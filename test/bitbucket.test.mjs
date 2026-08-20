@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import {
   bitbucketRequest,
+  bitbucketLookup,
   bitbucketReviewAlreadyPosted,
   createBitbucketReviewMarker,
   getBitbucketPullRequest,
@@ -44,6 +45,45 @@ test('Bitbucket repository discovery rejects malformed metadata', async () => {
   );
 });
 
+test('Bitbucket lookup prefers IPv4 while preserving IPv4-only and IPv6-only resolution', async (t) => {
+  const resolve = (records, failure) => new Promise((resolveAddress, rejectAddress) => {
+    const lookup = (hostname, options, callback) => {
+      assert.equal(hostname, 'api.bitbucket.org');
+      assert.deepEqual(options, { all: false, order: 'ipv4first' });
+      if (failure) {
+        callback(failure);
+        return;
+      }
+      const selected = records.find(({ family }) => family === 4) || records[0];
+      callback(null, selected.address, selected.family);
+    };
+    bitbucketLookup('api.bitbucket.org', { family: 0 }, (error, address, family) => {
+      if (error) rejectAddress(error);
+      else resolveAddress({ address, family });
+    }, lookup);
+  });
+
+  await t.test('dual stack chooses IPv4', async () => {
+    assert.deepEqual(await resolve([
+      { address: '2001:db8::1', family: 6 },
+      { address: '192.0.2.1', family: 4 },
+    ]), { address: '192.0.2.1', family: 4 });
+  });
+  await t.test('IPv6-only remains usable', async () => {
+    assert.deepEqual(await resolve([
+      { address: '2001:db8::1', family: 6 },
+    ]), { address: '2001:db8::1', family: 6 });
+  });
+  await t.test('IPv4-only remains usable', async () => {
+    assert.deepEqual(await resolve([
+      { address: '192.0.2.1', family: 4 },
+    ]), { address: '192.0.2.1', family: 4 });
+  });
+  await t.test('DNS errors fail closed', async () => {
+    await assert.rejects(resolve([], new Error('DNS failed')), /DNS failed/u);
+  });
+});
+
 test('Bitbucket REST boundary pins HTTPS, API host, and bounded API paths', async () => {
   let options;
   let timeoutMs;
@@ -69,7 +109,9 @@ test('Bitbucket REST boundary pins HTTPS, API host, and bounded API paths', asyn
   assert.equal(options.protocol, 'https:');
   assert.equal(options.hostname, 'api.bitbucket.org');
   assert.equal(options.port, 443);
-  assert.equal(options.family, 4);
+  assert.equal('family' in options, false);
+  assert.equal(options.lookup, bitbucketLookup);
+  assert.equal(options.autoSelectFamily, false);
   assert.equal(options.method, 'GET');
   assert.equal(
     options.headers.authorization,
@@ -82,7 +124,7 @@ test('Bitbucket REST boundary pins HTTPS, API host, and bounded API paths', asyn
   );
 });
 
-test('Bitbucket comment POST uses the IPv4 boundary once with one serialized body', async () => {
+test('Bitbucket comment POST uses the IPv4-first boundary once with one serialized body', async () => {
   const suppliedOptions = [];
   const writes = [];
   let timeoutMs;
@@ -110,7 +152,9 @@ test('Bitbucket comment POST uses the IPv4 boundary once with one serialized bod
     request,
   }), { id: 42 });
   assert.equal(suppliedOptions.length, 1);
-  assert.equal(suppliedOptions[0].family, 4);
+  assert.equal('family' in suppliedOptions[0], false);
+  assert.equal(suppliedOptions[0].lookup, bitbucketLookup);
+  assert.equal(suppliedOptions[0].autoSelectFamily, false);
   assert.equal(suppliedOptions[0].protocol, 'https:');
   assert.equal(suppliedOptions[0].hostname, 'api.bitbucket.org');
   assert.equal(suppliedOptions[0].port, 443);
