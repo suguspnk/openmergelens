@@ -498,6 +498,7 @@ test('Bitbucket discovery filters open repository PRs by stable reviewer UUID', 
         values: [
           { id: 7, reviewers: [{ uuid: account.accountId }] },
           { id: 8, reviewers: [{ uuid: '{223e4567-e89b-42d3-a456-426614174000}' }] },
+          { id: 9 },
         ],
       };
     },
@@ -505,31 +506,77 @@ test('Bitbucket discovery filters open repository PRs by stable reviewer UUID', 
   assert.deepEqual(result, [{ repo: 'Workspace/repo name', number: 7 }]);
   assert.equal(
     paths[0],
-    '/2.0/repositories/Workspace/repo%20name/pullrequests?state=OPEN&pagelen=50',
+    '/2.0/repositories/Workspace/repo%20name/pullrequests?' +
+      'state=OPEN&pagelen=50&fields=%2Bvalues.reviewers',
   );
+});
+
+test('Bitbucket discovery returns a requested PR from a later collection page', async () => {
+  const firstPath = '/2.0/repositories/workspace/repo/pullrequests?' +
+    'state=OPEN&pagelen=50&fields=%2Bvalues.reviewers';
+  const secondPath = `${firstPath}&page=2`;
+  const paths = [];
+  const result = await searchBitbucketReviewRequestedPRs({
+    account,
+    repo: 'workspace/repo',
+    auth,
+    api: async ({ path }) => {
+      paths.push(path);
+      if (path === firstPath) {
+        return {
+          values: [{
+            id: 7,
+            reviewers: [{ uuid: '{223e4567-e89b-42d3-a456-426614174000}' }],
+          }],
+          next: `https://api.bitbucket.org${secondPath}`,
+        };
+      }
+      if (path === secondPath) {
+        return {
+          values: [{ id: 8, reviewers: [{ uuid: account.accountId }] }],
+        };
+      }
+      throw new Error(`unexpected Bitbucket API path: ${path}`);
+    },
+  });
+  assert.deepEqual(paths, [firstPath, secondPath]);
+  assert.deepEqual(result, [{ repo: 'workspace/repo', number: 8 }]);
 });
 
 test('Bitbucket PR discovery fails closed instead of truncating at the value limit', async () => {
   let page = 0;
+  const paths = [];
   await assert.rejects(
     searchBitbucketReviewRequestedPRs({
       account,
       repo: 'workspace/repo',
       auth,
-      api: async () => {
+      api: async ({ path }) => {
+        paths.push(path);
         page += 1;
         return {
           values: Array.from({ length: 50 }, (_value, index) => ({
             id: ((page - 1) * 50) + index + 1,
             reviewers: [{ uuid: account.accountId }],
           })),
-          next: `https://api.bitbucket.org/2.0/repositories/workspace/repo/pullrequests?state=OPEN&pagelen=50&page=${page + 1}`,
+          next: 'https://api.bitbucket.org/2.0/repositories/workspace/repo/pullrequests?' +
+            `state=OPEN&pagelen=50&fields=%2Bvalues.reviewers&page=${page + 1}`,
         };
       },
     }),
     /pagination exceeded the value limit/u,
   );
   assert.equal(page, 10);
+  assert.equal(
+    paths[0],
+    '/2.0/repositories/workspace/repo/pullrequests?' +
+      'state=OPEN&pagelen=50&fields=%2Bvalues.reviewers',
+  );
+  assert.equal(
+    paths[1],
+    '/2.0/repositories/workspace/repo/pullrequests?' +
+      'state=OPEN&pagelen=50&fields=%2Bvalues.reviewers&page=2',
+  );
 });
 
 test('Bitbucket comment discovery fails closed instead of missing a marker after the value limit', async () => {

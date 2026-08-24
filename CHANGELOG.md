@@ -4,6 +4,8 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Fixed Bitbucket Cloud review discovery by explicitly requesting reviewer data
+  that the pull-request collection omits by default.
 - Changed Bitbucket Cloud repository discovery to enumerate the authenticated
   user's workspaces before listing member repositories, with bounded pagination
   and actionable recovery for missing workspace or repository token scopes.
