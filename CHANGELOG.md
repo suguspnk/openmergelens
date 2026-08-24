@@ -4,6 +4,8 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-08-25
+
 - Required an observed Bitbucket reviewer removal and a later fresh assignment
   before new commits can trigger another review, matching the existing
   request-driven review contract even though Bitbucket comments do not fulfill
