@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { ADDRCONFIG } from 'node:dns';
 import { EventEmitter } from 'node:events';
 import { createServer, request as httpRequest } from 'node:http';
@@ -729,6 +730,25 @@ test('Bitbucket metadata is normalized to the poller PR contract', async () => {
   });
 });
 
+test('Bitbucket review markers use Markdown reference definitions and recognize legacy HTML', async () => {
+  const marker = createBitbucketReviewMarker({
+    account, repo: 'workspace/repo', number: 7, commitId: 'abc',
+  });
+  assert.match(marker, /^\[openmergelens-review-[a-f0-9]{64}\]: #$/u);
+  assert.doesNotMatch(marker, /[<>]/u);
+  const digest = /^\[openmergelens-review-([a-f0-9]{64})\]: #$/u.exec(marker)[1];
+  const legacyMarker = `<!-- openmergelens-review:${digest} -->`;
+  assert.equal(await bitbucketReviewAlreadyPosted({
+    repo: 'workspace/repo', number: 7, marker, auth,
+    api: async () => ({
+      values: [{
+        user: { uuid: account.accountId },
+        content: { raw: `Legacy review\n\n${legacyMarker}` },
+      }],
+    }),
+  }), true);
+});
+
 test('Bitbucket review preparation demotes invalid inline locations', () => {
   const prepared = prepareBitbucketReview({
     body: 'Summary', marker: '<!-- marker -->', auth,
@@ -826,8 +846,10 @@ test('Bitbucket posting writes inline comments before the completion marker', as
   });
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[0].inline, { path: 'src/a.js', to: 1 });
-  assert.doesNotMatch(calls[0].content.raw, /openmergelens-review:/u);
-  assert.match(calls[1].content.raw, /openmergelens-review:/u);
+  assert.match(calls[0].content.raw, /\[openmergelens-finding-[a-f0-9]{64}\]: #$/u);
+  assert.doesNotMatch(calls[0].content.raw, /<!--/u);
+  assert.match(calls[1].content.raw, /\[openmergelens-review-[a-f0-9]{64}\]: #$/u);
+  assert.doesNotMatch(calls[1].content.raw, /<!--/u);
   assert.doesNotMatch(calls[1].content.raw, /OpenMergeLens generated this review/u);
   assert.equal(await bitbucketReviewAlreadyPosted({
     repo: 'workspace/repo', number: 7, marker, auth,
@@ -858,7 +880,49 @@ test('Bitbucket posting demotes a provider-rejected inline location into the sum
   });
   assert.equal(posted.length, 1);
   assert.match(posted[0], /src\/a\.js:1/u);
-  assert.match(posted[0], /openmergelens-review:/u);
+  assert.match(posted[0], /\[openmergelens-review-[a-f0-9]{64}\]: #$/u);
+});
+
+test('Bitbucket posting recognizes legacy partial inline markers without duplicating findings', async () => {
+  const marker = createBitbucketReviewMarker({
+    account, repo: 'workspace/repo', number: 7, commitId: 'abc',
+  });
+  const reviewDigest = /^\[openmergelens-review-([a-f0-9]{64})\]: #$/u.exec(marker)[1];
+  const legacyReviewMarker = `<!-- openmergelens-review:${reviewDigest} -->`;
+  const finding = {
+    path: 'src/a.js', line: 1, severity: 'major', comment: 'Existing finding',
+  };
+  const legacyFindingIdentity = JSON.stringify([
+    legacyReviewMarker, 0, finding.path, finding.line,
+  ]);
+  const legacyFindingDigest = createHash('sha256')
+    .update(legacyFindingIdentity)
+    .digest('hex');
+  const legacyFindingMarker = `<!-- openmergelens-finding:${legacyFindingDigest} -->`;
+  const posts = [];
+  await postBitbucketReview({
+    repo: 'workspace/repo', number: 7, body: 'Summary', marker, auth,
+    diff: '+++ b/src/a.js\n@@ -0,0 +1 @@\n+line\n',
+    comments: [finding],
+    api: async (request) => {
+      if (request.method === 'POST') {
+        posts.push(request.body);
+        return { id: 2 };
+      }
+      return {
+        values: [{
+          user: { uuid: account.accountId },
+          content: { raw: `**[major]** Existing finding\n\n${legacyFindingMarker}` },
+          inline: { path: finding.path, to: finding.line },
+        }],
+      };
+    },
+    scheduleMutation: (operation) => operation(),
+  });
+
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].inline, undefined);
+  assert.match(posts[0].content.raw, /\[openmergelens-review-[a-f0-9]{64}\]: #$/u);
 });
 
 test('Bitbucket posting resumes an immutable prepared plan without duplicates', async () => {

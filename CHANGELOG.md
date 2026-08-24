@@ -4,6 +4,9 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Fixed Bitbucket Cloud reconciliation signatures appearing as visible HTML by
+  emitting non-rendering Markdown reference definitions instead, while still
+  recognizing reviews and partial inline posts made with the legacy markers.
 - Added a manual, provider-qualified per-repository `reviewAttribution` setting.
   The visible OpenMergeLens review footer remains enabled by default, while an
   explicit `false` hides it without removing the private reconciliation marker.
