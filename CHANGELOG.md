@@ -4,6 +4,34 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Required an observed Bitbucket reviewer removal and a later fresh assignment
+  before new commits can trigger another review, matching the existing
+  request-driven review contract even though Bitbucket comments do not fulfill
+  reviewer assignments.
+- Hardened Bitbucket pagination against later pages that drop the requested
+  reviewer fields, rejected terminal-control and invisible-format characters in
+  credential usernames, and split the Windows Node 22 poller regression window
+  around its durable-write-heavy cases.
+- Fixed Bitbucket Cloud reconciliation signatures appearing as visible HTML by
+  emitting non-rendering Markdown reference definitions instead, while still
+  recognizing reviews and partial inline posts made with the legacy markers.
+- Added a manual, provider-qualified per-repository `reviewAttribution` setting.
+  The visible OpenMergeLens review footer remains enabled by default, while an
+  explicit `false` hides it without removing the private reconciliation marker.
+- Fixed Bitbucket Cloud pull-request diff fetching by following its documented
+  one-hop redirect only when it remains on the expected API and repository path.
+- Fixed Bitbucket Cloud review discovery by explicitly requesting reviewer data
+  that the pull-request collection omits by default.
+- Changed Bitbucket Cloud repository discovery to enumerate the authenticated
+  user's workspaces before listing member repositories, with bounded pagination
+  and actionable recovery for missing workspace or repository token scopes.
+- Fixed Bitbucket Cloud API timeouts on dual-stack hosts with unusable IPv6
+  routes by preferring IPv4 for each HTTPS request while retaining IPv6-only
+  network support.
+- Added interactive Bitbucket Cloud account and repository discovery to both
+  `openmergelens init` and `openmergelens config`, including credential-backed
+  UUID verification and searchable member-repository selection.
+
 ## [1.6.0] - 2026-08-19
 
 - Added Bitbucket Cloud account configuration, credential resolution, pull

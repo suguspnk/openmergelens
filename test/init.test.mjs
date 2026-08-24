@@ -73,6 +73,7 @@ test('init preserves a manually configured reviewer timeout when rebuilding conf
     reviewBatchSize: 2,
     reviewFocusCount: 4,
     reviewTimeoutMs: 15 * 60 * 1000,
+    reviewAttribution: { 'github.com/owner/repo': false },
     desktopNotifications: true,
     stateFile: './state.json',
   };
@@ -88,6 +89,7 @@ test('init preserves a manually configured reviewer timeout when rebuilding conf
   });
 
   assert.equal(rebuilt.reviewTimeoutMs, existingConfig.reviewTimeoutMs);
+  assert.deepEqual(rebuilt.reviewAttribution, existingConfig.reviewAttribution);
   assert.equal(rebuilt.desktopNotifications, false);
 });
 
@@ -317,6 +319,22 @@ test('reviewer backend selector always keeps the custom command option', () => {
       { id: 'codex', label: 'Codex CLI', status: 'not-found' },
     ]).map(({ value }) => value),
     ['custom'],
+  );
+});
+
+test('reviewer backend selector excludes custom commands when Bitbucket is selected', () => {
+  assert.deepEqual(
+    reviewerBackendOptions([
+      { id: 'claude', label: 'Claude Code', status: 'ready' },
+      { id: 'codex', label: 'Codex CLI', status: 'not-found' },
+    ], { allowCustom: false }).map(({ value }) => value),
+    ['claude'],
+  );
+  assert.deepEqual(
+    reviewerBackendOptions([
+      { id: 'claude', label: 'Claude Code', status: 'not-found' },
+    ], { allowCustom: false }),
+    [],
   );
 });
 

@@ -25,6 +25,7 @@
   "reviewBatchSize": 5,
   "reviewFocusCount": 4,
   "reviewTimeoutMs": 1800000,
+  "reviewAttribution": {},
   "desktopNotifications": true,
   "stateFile": "./state.json"
 }

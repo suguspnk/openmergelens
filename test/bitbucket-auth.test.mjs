@@ -2,7 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { resolveBitbucketAuth, __test } from '../lib/bitbucket-auth.mjs';
+import {
+  discoverBitbucketAccount,
+  normalizeBitbucketCredentialUsername,
+  resolveBitbucketAuth,
+  __test,
+} from '../lib/bitbucket-auth.mjs';
 
 const account = {
   accountId: '{123e4567-e89b-42d3-a456-426614174000}',
@@ -47,6 +52,57 @@ test('credential parser rejects a mismatched username', () => {
   assert.throws(
     () => __test.parseCredential('username=other\npassword=secret\n', account.credentialUsername),
     /unusable/u,
+  );
+});
+
+test('Bitbucket account discovery derives the stable UUID without persisting credentials', async () => {
+  const discovered = await discoverBitbucketAccount(' reviewer@example.com ', {
+    credentialFill: async ({ input }) => {
+      assert.equal(input, 'protocol=https\nhost=bitbucket.org\nusername=reviewer@example.com\n\n');
+      return 'username=reviewer@example.com\npassword=secret-value\n';
+    },
+    requestUser: async ({ auth }) => {
+      assert.equal(auth.password, 'secret-value');
+      return { uuid: account.accountId.toUpperCase(), display_name: 'Reviewer' };
+    },
+  });
+  assert.deepEqual(discovered.account, {
+    hostname: 'bitbucket.org',
+    accountId: account.accountId,
+    credentialUsername: account.credentialUsername,
+  });
+  assert.equal('password' in discovered.account, false);
+});
+
+test('Bitbucket username and identity validation fail before unsafe credential use', async () => {
+  for (const unsafe of [
+    'reviewer\npassword=injected',
+    'reviewer\u001b[31m@example.com',
+    'reviewer\u202e@example.com',
+    'reviewer\u200b@example.com',
+  ]) {
+    assert.throws(() => normalizeBitbucketCredentialUsername(unsafe), /invalid/u);
+  }
+  let credentialCalls = 0;
+  await assert.rejects(
+    discoverBitbucketAccount('reviewer\npassword=injected', {
+      credentialFill: async () => { credentialCalls += 1; },
+      requestUser: async () => ({ uuid: account.accountId }),
+    }),
+    /invalid/u,
+  );
+  assert.equal(credentialCalls, 0);
+
+  await assert.rejects(
+    discoverBitbucketAccount(account.credentialUsername, {
+      credentialFill: async () => 'username=reviewer@example.com\npassword=hidden\n',
+      requestUser: async () => ({ uuid: 'not-a-uuid', raw: 'hidden' }),
+    }),
+    (error) => {
+      assert.match(error.message, /valid account UUID/u);
+      assert.doesNotMatch(error.message, /hidden/u);
+      return true;
+    },
   );
 });
 

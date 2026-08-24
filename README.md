@@ -93,18 +93,19 @@ Before running anything, make sure you have:
    ```bash
    node --version
    ```
-2. **GitHub CLI (`gh`), authenticated**
+2. **For GitHub repositories: GitHub CLI (`gh`), authenticated**
    ```bash
    gh auth status
    ```
    If this fails, run `gh auth login` first. Multiple authenticated accounts,
-   including accounts on different GitHub hosts, can run together.
+   including accounts on different GitHub hosts, can run together. A
+   Bitbucket-only setup does not require `gh`.
 3. **A reviewer CLI**, already logged in on its own: pick one:
    - [Claude Code](https://claude.com/claude-code): `claude /login`
    - [Codex CLI](https://github.com/openai/codex): `codex login`
-   - A custom CLI that can read a prompt from stdin, print text/JSON to
-     stdout, attach a per-run MCP server, and restrict access to the named MCP
-     inspection tool.
+   - For GitHub-only configurations, a custom CLI that can read a prompt from
+     stdin, print text/JSON to stdout, attach a per-run MCP server, and restrict
+     access to the named MCP inspection tool.
 
 ## Install
 
@@ -149,38 +150,48 @@ openmergelens init
 ```
 
 This will:
-1. List every account authenticated in `gh` and ask which complete set of
-   accounts should watch for requested reviews and post reviews. Existing
-   configured accounts are preselected. The wizard explains that a PR must be
-   in GitHub's **Reviewers** list for the selected account; the request may be
-   manual or supplied by `CODEOWNERS`.
-2. For each account, show every accessible repository as a searchable
-   multi-select. Every account must explicitly watch at least one repository;
-   there is no global-search mode. Watching a repository only enables the
-   requested-review search; it does not request reviews automatically.
-3. Seed one shared prompt per GitHub host/repository and one independent
-   learnings file per host/account/repository. Existing files are never
-   overwritten.
-4. Detect Claude Code / Codex on your `PATH` and check whether each is
-   actually authenticated (not just installed). You can also enter a custom
-   reviewer command instead. Codex runs in ephemeral, read-only mode and
-   accepts the prompt-only review workspace without requiring a Git checkout.
-5. For a built-in backend, choose a current model from the backend catalog or
-   enter a model ID, then choose its reasoning/thinking effort (or keep each
-   setting at the CLI default). Custom commands use their own model settings.
-6. Require one explicit consent for the complete selected repository set
+1. Ask whether to configure GitHub, Bitbucket Cloud, or both. Fresh setup
+   defaults to GitHub; Bitbucket-only setup works without `gh`.
+2. Detect Claude Code / Codex on your `PATH` and check whether each is
+   actually authenticated (not just installed). Bitbucket requires the
+   generated Codex or Claude backend. GitHub-only setup may instead use a
+   compatible custom reviewer command. Codex runs in ephemeral, read-only mode.
+   For a generated backend, choose its model and reasoning/thinking effort (or
+   keep either setting at the CLI default) before configuring provider accounts.
+3. For GitHub, list authenticated `gh` accounts. For Bitbucket Cloud, ask for
+   the exact username of a stored noninteractive `bitbucket.org` Git credential,
+   verify it with `/2.0/user`, and derive the stable braced account UUID. You
+   can add multiple Bitbucket accounts; existing configured accounts are
+   preselected and reverified.
+4. For every retained account, show accessible repositories as a searchable
+   multi-select. Bitbucket first lists the authenticated user's workspaces, then
+   lists member repositories within each workspace; it never falls back to the
+   deprecated account-wide repository endpoint. Every account must explicitly
+   watch at least one repository.
+   Watching a repository enables requested-review discovery; it does not add a
+   reviewer to a pull request automatically.
+5. Require one explicit consent for the complete selected repository set
    before source code, pull-request content, or personal data can be processed
    by the selected third-party AI provider. Declining leaves setup unchanged.
-7. Ask how many independent review focus categories to run per PR. The
+6. Ask how many independent review focus categories to run per PR. The
    recommended choice runs all four categories plus synthesis; lower choices
    reduce reviewer calls by skipping later categories.
-8. Ask whether completed polls should show desktop notifications (enabled by
-   default). After setup is applied, send a test notification, confirm that it
-   appeared, and show platform-specific recovery steps if the operating system
-   suppresses it.
-9. Offer one schedule for the complete multi-account poller.
-10. Preview the config, deterministic review-file paths, and schedule, then ask
-   once before applying them.
+7. Ask whether completed polls should show desktop notifications (enabled by
+   default).
+8. Offer one schedule for the complete multi-account poller.
+9. Preview the config, deterministic review-file paths, and schedule, then ask
+   once before applying them. Declining leaves the config and review files
+   unchanged.
+10. After confirmation, seed shared prompts under
+    `~/.openmergelens/docs/review-prompts/<host>/<owner>/<repo>.md`. Learnings
+    are account-specific: GitHub uses
+    `~/.openmergelens/docs/learnings/<host>/<username>/<owner>/<repo>.md`, while
+    Bitbucket uses
+    `~/.openmergelens/docs/learnings/bitbucket.org/<account-uuid>/<workspace>/<repo>.md`.
+    Existing files are never overwritten. The wizard then saves the config,
+    applies the selected schedule, and, when notifications are enabled, sends a
+    test notification with platform-specific recovery guidance if it is
+    suppressed.
 
 Cancelling before the final confirmation leaves the config and review files
 unchanged.
@@ -196,10 +207,14 @@ openmergelens config
 The editor groups accounts and repositories, reviewer backend and model, review
 behavior, notifications, and scheduling. Each completed change is validated
 and saved immediately, then the menu remains open for another change. Account
-and repository edits reuse GitHub authentication and accessible-repository
-selection; newly watched repositories get missing prompt and learnings files
-without overwriting existing files. Removed watches stop being polled but keep
-their files. Schedule changes reconcile the installed cron, launchd, or Windows
+and repository edits reuse the provider-specific authentication and searchable
+repository selection. You can edit or remove either provider's watches while
+preserving the other provider; the last configured provider account cannot be
+removed. Bitbucket edits require a generated Codex or Claude backend, and a
+configuration containing Bitbucket watches cannot switch to a custom backend.
+Newly watched repositories get missing prompt and learnings files without
+overwriting existing files. Removed watches stop being polled but keep their
+files. Schedule changes reconcile the installed cron, launchd, or Windows
 Task Scheduler entry immediately; the scheduler choice and interval remain
 operational state outside `config.json`.
 
@@ -231,18 +246,32 @@ After running the command for the package manager you used, copy
 | `reviewBatchSize` | Configured upper bound for concurrent PR reviews across all accounts (defaults to `5`). A built-in memory admission cap of three reviews also applies. |
 | `reviewFocusCount` | Number of independent review focus categories to run before the final synthesis pass (defaults to `4`, maximum `4`). The onboarding wizard asks for this; lower values skip later categories to trade coverage for runtime. |
 | `reviewTimeoutMs` | Maximum runtime for each reviewer process (defaults to `1800000`, 30 minutes; accepts `60000` through `3600000`). `openmergelens config` can update it in the Review behavior menu; `init` preserves an existing value. |
+| `reviewAttribution` | Optional per-repository map controlling the visible “OpenMergeLens generated this review” attribution. Attribution defaults to `true`; set a provider-qualified repository such as `"bitbucket.org/WORKSPACE/REPO": false` to hide it. This manual option is not shown in the interactive wizard. Non-rendering reconciliation markers remain in the raw comment either way. |
 | `desktopNotifications` | Show one audible desktop notification after a poll produces review results or needs attention (defaults to `true`). Set to `false` to opt out. |
 | `stateFile` | Where last-reviewed commit SHAs are tracked (defaults to `./state.json`, resolved under `~/.openmergelens/`). |
+
+For example, this disables the visible attribution only for one Bitbucket
+repository; every unlisted repository remains enabled:
+
+```json
+"reviewAttribution": {
+  "bitbucket.org/mwell-systems/mwell-healthpal-cms": false
+}
+```
 
 `~/.openmergelens/config.json` is local, machine-specific config. It is never
 committed to a repo. It stores hostnames and usernames, never tokens. Each poll
 retrieves every selected GitHub account's token from the GitHub CLI credential store.
 For Bitbucket Cloud, configure a noninteractive HTTPS credential in Git's credential
-store for `bitbucket.org` and the exact `credentialUsername` first, for example with
-your platform credential helper; OpenMergeLens invokes `git credential fill` and
-never writes the returned token to config, state, logs, reviewer arguments, or the
-reviewer environment. Each poll verifies that `/2.0/user` returns the configured
-`accountId`. The reviewer never receives provider credentials. For GitHub,
+store for `bitbucket.org` first, then select **Bitbucket Cloud** in
+`openmergelens init` or under **Accounts & repositories** in
+`openmergelens config`. Enter the exact credential username; the wizard verifies
+the credential with `/2.0/user`, derives the stable account UUID, and lets you
+search and select accessible member repositories. OpenMergeLens invokes
+`git credential fill` and never writes the returned token to config, state, logs,
+reviewer arguments, or the reviewer environment. Each poll verifies that
+`/2.0/user` still returns the configured `accountId`. The reviewer never receives
+provider credentials. For GitHub,
 OpenMergeLens exposes one
 temporary structured inspection tool backed by a per-review local gateway
 that permits only GET operations for the fixed PR and its repository. The
@@ -260,15 +289,25 @@ username=reviewer@example.com
 password=<Bitbucket Cloud API token>
 ```
 
-Use the same username in `credentialUsername`. Obtain `accountId` from the
-authenticated Bitbucket Cloud `GET https://api.bitbucket.org/2.0/user` response;
-copy its `uuid` exactly, including braces. OpenMergeLens never prompts during a
-poll: a missing helper entry fails that account closed.
+Enter the same username when the wizard asks for the Bitbucket credential
+username. OpenMergeLens never prompts during a poll: a missing helper entry fails
+that account closed.
 
-Bitbucket accounts are currently added by editing `config.json`; the setup and
-config wizards preserve existing Bitbucket entries and include them in the
-AI-processing consent scope. Starting from the bundled full example, replace
-the two provider account fields with this Bitbucket-only account section:
+Create the Bitbucket Cloud API token with these exact permission scopes:
+`read:user:bitbucket`, `read:workspace:bitbucket`,
+`read:repository:bitbucket`, `read:pullrequest:bitbucket`, and
+`write:pullrequest:bitbucket` (required for posting reviews). Older tokens that
+lack `read:workspace:bitbucket` can return HTTP 403 during setup; recreate the
+token with all five scopes and rerun `openmergelens init` or
+`openmergelens config`. A repository HTTP 404 or 410 means the selected
+workspace is no longer discoverable; the wizard leaves the existing
+configuration unchanged.
+
+Manual JSON configuration remains available as an alternative. Obtain `accountId`
+from the authenticated Bitbucket Cloud `GET https://api.bitbucket.org/2.0/user`
+response and copy its `uuid` exactly, including braces. Starting from the bundled
+full example, replace the two provider account fields with this Bitbucket-only
+account section:
 
 ```json
 {
@@ -286,6 +325,14 @@ The account must appear in each pull request's Bitbucket **Reviewers** list.
 OpenMergeLens posts individual inline comments and a completion summary; it does
 not call Bitbucket's approval endpoint. `--dry-run` performs reads and reviewer
 execution but does not post comments or update state.
+Because a Bitbucket comment does not fulfill or remove a reviewer assignment,
+OpenMergeLens will not treat a new commit alone as a renewed request. After a
+completed review, the reviewer must be removed, OpenMergeLens must observe one
+complete repository poll without that reviewer, and the reviewer must then be
+added again after the new commits. Re-adding the reviewer on the already-reviewed
+head consumes that request cycle; later commits still require another observed
+remove-and-add cycle. This provider-specific state is stored atomically with the
+reviewed commit and never authorizes a repository or account outside its key.
 Tracked Bitbucket entries may reconcile a completion comment after a failed
 state write, but they never trigger a new review or comment unless the stable
 reviewer UUID is present in the current discovery result. Before the first
@@ -305,9 +352,8 @@ merged in one bounded final pass. No diff bytes are silently truncated; an
 editable provider template may contain at most one `{{diff}}` placeholder.
 Bitbucket review prompts currently use the generated Codex or Claude backend;
 custom MCP-placeholder commands remain supported for GitHub configurations.
-To record consent after adding Bitbucket entries, run `openmergelens config`,
-choose **Reviewer backend**, reselect the current generated backend, and confirm
-the complete GitHub-plus-Bitbucket repository scope.
+The setup and config wizards include the complete GitHub-plus-Bitbucket repository
+scope when they request renewed AI-processing consent.
 
 ## Logs and diagnostics
 

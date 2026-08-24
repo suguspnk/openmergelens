@@ -3,23 +3,18 @@ import * as p from '@clack/prompts';
 import { access, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { currentUsername, listAccessibleRepos } from '../lib/github.mjs';
 import {
   createAiProcessingConsent,
   retainAiProcessingConsent,
 } from '../lib/ai-processing-consent.mjs';
 import {
-  accountKey,
   accountLabel,
   CONFIG_VERSION,
+  retainReviewAttribution,
   saveConfig,
   validateConfig,
   validateNormalizedConfig,
 } from '../lib/config.mjs';
-import {
-  listAuthenticatedAccounts,
-  resolveGitHubAuth,
-} from '../lib/github-auth.mjs';
 import { detectAgents } from '../lib/agent-detect.mjs';
 import { ensurePrivateDirectory } from '../lib/file-security.mjs';
 import { ensureLearningsFile, learningsPathFor } from '../lib/learnings.mjs';
@@ -46,7 +41,11 @@ import {
 import {
   applyScheduleSelection,
   canonicalRepositorySelections,
+  configureBitbucketAccounts,
+  configureGitHubAccounts,
+  initialProviderSelections,
   isInteractiveTerminal,
+  providerOptions,
   recheckReviewerAgent,
   reviewerBackendOptions,
   selectableReviewerAgents,
@@ -79,6 +78,7 @@ const reviewPromptTemplatePath = path.join(
 
 export function buildSetupConfig({
   githubAccounts,
+  bitbucketAccounts,
   aiProcessingConsent,
   reviewerCommand,
   model,
@@ -89,7 +89,7 @@ export function buildSetupConfig({
   return validateNormalizedConfig({
     configVersion: CONFIG_VERSION,
     githubAccounts,
-    bitbucketAccounts: existingConfig?.bitbucketAccounts || [],
+    bitbucketAccounts: bitbucketAccounts ?? existingConfig?.bitbucketAccounts ?? [],
     aiProcessingConsent,
     reviewerCommand,
     model,
@@ -101,6 +101,15 @@ export function buildSetupConfig({
     // The timeout is intentionally manual-only; preserve an existing
     // override without adding another setup prompt.
     reviewTimeoutMs: existingConfig?.reviewTimeoutMs,
+    // Attribution overrides are intentionally manual-only too. Preserve
+    // existing per-repository choices without adding them to the setup wizard.
+    reviewAttribution: retainReviewAttribution(
+      existingConfig?.reviewAttribution,
+      [
+        ...(githubAccounts || existingConfig?.githubAccounts || []),
+        ...(bitbucketAccounts || existingConfig?.bitbucketAccounts || []),
+      ],
+    ),
     desktopNotifications,
     stateFile: existingConfig?.stateFile || './state.json',
   });
@@ -185,12 +194,13 @@ async function main() {
   }
 
   console.clear();
-  p.intro('OpenMergeLens: configure independent GitHub reviewer accounts');
+  p.intro('OpenMergeLens: configure reviewer accounts');
   p.note(
-    "OpenMergeLens reviews open pull requests only when a selected account is in GitHub's " +
-      'Reviewers list. The request can be added manually or created automatically by a ' +
-      'matching CODEOWNERS rule. After a review, new commits alone do not start another ' +
-      'review; the PR author must request the account again in Reviewers.',
+    "OpenMergeLens reviews open pull requests only when a selected account is in the provider's " +
+      'Reviewers list. GitHub requests can be added manually or created by a matching ' +
+      'CODEOWNERS rule; Bitbucket requests are added in the pull request. After a review, ' +
+      'new commits alone do not start another review; the PR author must request the account ' +
+      'again in Reviewers.',
     'When reviews run',
   );
 
@@ -205,76 +215,13 @@ async function main() {
 
   try {
     const existingConfig = await readExistingConfig();
-    const authenticatedAccounts = await listAuthenticatedAccounts();
-    if (authenticatedAccounts.length === 0) {
-      throw new Error('GitHub CLI has no authenticated accounts; run `gh auth login`');
-    }
-
-    const existingByKey = new Map(
-      (existingConfig?.githubAccounts || []).map((account) => [accountKey(account), account]),
-    );
-    const availableByKey = new Map(
-      authenticatedAccounts.map((account) => [accountKey(account), account]),
-    );
-    const selectedAccountKeys = await p.autocompleteMultiselect({
-      message: 'Which GitHub accounts should watch for review requests?',
-      options: authenticatedAccounts.map((account) => ({
-        value: accountKey(account),
-        label: accountLabel(account),
-        hint: account.active ? 'currently active in gh' : undefined,
-      })),
-      initialValues: authenticatedAccounts
-        .filter((account) => existingByKey.has(accountKey(account)))
-        .map(accountKey),
+    const providers = await p.multiselect({
+      message: 'Which repository providers should OpenMergeLens configure?',
+      options: providerOptions(),
+      initialValues: initialProviderSelections(existingConfig),
       required: true,
     });
-    if (p.isCancel(selectedAccountKeys)) exitCancelled();
-
-    let githubAccounts = [];
-    for (const selectedKey of selectedAccountKeys) {
-      const selected = availableByKey.get(selectedKey);
-      const auth = await resolveGitHubAuth(selected);
-      const username = await currentUsername({ auth });
-      if (username.toLowerCase() !== selected.username.toLowerCase()) {
-        throw new Error(
-          `Selected ${selected.username}, but its credential belongs to ${username}`,
-        );
-      }
-      const account = { hostname: selected.hostname, username };
-      p.log.success(`Authenticated ${accountLabel(account)}`);
-
-      const spinner = p.spinner();
-      spinner.start(`Fetching repositories for ${accountLabel(account)}`);
-      let repos;
-      try {
-        repos = await listAccessibleRepos({ auth });
-      } catch (err) {
-        spinner.stop('Repository fetch failed');
-        throw err;
-      }
-      spinner.stop(`Found ${repos.length} repository(s) for ${accountLabel(account)}`);
-      if (repos.length === 0) {
-        throw new Error(`${accountLabel(account)} has no accessible repositories`);
-      }
-
-      const existingRepositories = existingByKey.get(selectedKey)?.repositories || [];
-      const repositories = await p.autocompleteMultiselect({
-        message: `Which repositories should ${accountLabel(account)} watch for review requests?`,
-        options: repos.map((repo) => ({
-          value: repo.nameWithOwner,
-          label: repo.nameWithOwner,
-          hint: repo.isPrivate ? 'private' : undefined,
-        })),
-        initialValues: canonicalRepositorySelections(existingRepositories, repos),
-        required: true,
-      });
-      if (p.isCancel(repositories)) exitCancelled();
-      githubAccounts.push({
-        ...account,
-        repositories,
-      });
-    }
-
+    if (p.isCancel(providers)) exitCancelled();
     const agentSpinner = p.spinner();
     agentSpinner.start('Checking known reviewer CLIs');
     let agents;
@@ -286,7 +233,17 @@ async function main() {
     }
     agentSpinner.stop('Done checking reviewer CLIs');
 
-    const agentOptions = reviewerBackendOptions(agents);
+    const includesBitbucket = providers.includes('bitbucket');
+    const agentOptions = reviewerBackendOptions(agents, {
+      allowCustom: !includesBitbucket,
+    });
+    if (agentOptions.length === 0) {
+      p.log.error(
+        'Bitbucket Cloud requires the generated Codex or Claude reviewer backend. ' +
+        'Install and authenticate one of those CLIs before continuing.',
+      );
+      exitCancelled();
+    }
 
     const backendChoice = await p.select({
       message: 'Which shared reviewer backend should all accounts use?',
@@ -351,10 +308,22 @@ async function main() {
       })
       : null;
 
+    const githubAccounts = providers.includes('github')
+      ? await configureGitHubAccounts({
+        existingAccounts: existingConfig?.githubAccounts || [],
+        onCancel: exitCancelled,
+      })
+      : [];
+    const bitbucketAccounts = includesBitbucket
+      ? await configureBitbucketAccounts({
+        existingAccounts: existingConfig?.bitbucketAccounts || [],
+        onCancel: exitCancelled,
+      })
+      : [];
+
     // Consent covers the complete selected repository set only after the user
     // evaluates one specific shared reviewer backend. A backend change can
     // change the external processor and its retention/training terms.
-    const bitbucketAccounts = existingConfig?.bitbucketAccounts || [];
     let aiProcessingConsent = retainAiProcessingConsent(
       existingConfig?.aiProcessingConsent,
       existingConfig?.reviewerCommand,
@@ -428,6 +397,7 @@ async function main() {
 
     const config = buildSetupConfig({
       githubAccounts,
+      bitbucketAccounts,
       aiProcessingConsent,
       reviewerCommand,
       model,
@@ -436,7 +406,8 @@ async function main() {
       existingConfig,
     });
 
-    const filePreview = githubAccounts.flatMap((account) =>
+    const allConfiguredAccounts = [...githubAccounts, ...bitbucketAccounts];
+    const filePreview = allConfiguredAccounts.flatMap((account) =>
       account.repositories.map((repo) => ({
         account: accountLabel(account),
         repo,
@@ -476,7 +447,7 @@ async function main() {
     const createdFiles = [];
     let configCommitted = false;
     try {
-      for (const account of githubAccounts) {
+      for (const account of allConfiguredAccounts) {
         for (const repo of account.repositories) {
           const promptPath = reviewPromptPathFor(account.hostname, repo);
           const learningsPath = learningsPathFor(account, repo);
@@ -507,7 +478,7 @@ async function main() {
     await finalizeSetup({
       scheduleChoice,
       intervalMinutes,
-      account: githubAccounts[0],
+      account: allConfiguredAccounts[0],
       desktopNotifications,
       // The setup E2E harness supplies a temporary scheduler home so its
       // manual cleanup path cannot inspect or change the user's schedules.
