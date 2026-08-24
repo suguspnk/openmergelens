@@ -22,7 +22,29 @@ const pollerTestPartitions = [
   '^[Bb]',
   '^[Cc]',
   '^[D-Fd-f]',
-  ...alphabeticPartitions.slice(1),
+  '^[G-Lg-l]',
+  '^[Mm]',
+  '^[Nn]',
+  '^[Oo]',
+  '^[Pp]',
+  '^[Q-Rq-r]',
+  '^[Ss]',
+  '^[Tt]',
+  '^[U-Zu-z]',
+];
+
+// The state suite contains many Windows retention and identity regressions.
+// Run those separately from the cross-platform state cases so a slow hosted
+// filesystem cannot cancel the whole file while preserving the same per-test
+// timeout and every fail-closed assertion.
+const stateTestPartitions = [
+  '^[A-Fa-f]',
+  '^[G-Lg-l]',
+  '^[M-Rm-r]',
+  '^[Ss]',
+  '^[T-Vt-v]',
+  '^Windows (?:retention|retained)',
+  '^Windows (?:cleanup|file|simulated|state)',
 ];
 
 export const partitionPatterns = new Map([
@@ -35,4 +57,5 @@ export const partitionPatterns = new Map([
     '^[M-Zm-z]',
   ]],
   ['poller.test.mjs', pollerTestPartitions],
+  ['state.test.mjs', stateTestPartitions],
 ]);
