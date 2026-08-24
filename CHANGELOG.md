@@ -4,6 +4,8 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Fixed Bitbucket Cloud pull-request diff fetching by following its documented
+  one-hop redirect only when it remains on the expected API and repository path.
 - Fixed Bitbucket Cloud review discovery by explicitly requesting reviewer data
   that the pull-request collection omits by default.
 - Changed Bitbucket Cloud repository discovery to enumerate the authenticated

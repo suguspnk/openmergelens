@@ -10,6 +10,7 @@ import {
   bitbucketReviewAlreadyPosted,
   createBitbucketReviewMarker,
   getBitbucketPullRequest,
+  getBitbucketPullRequestDiff,
   listAccessibleBitbucketRepos,
   postBitbucketReview,
   prepareBitbucketReview,
@@ -410,6 +411,111 @@ test('Bitbucket comment POST uses the IPv4-first boundary once with one serializ
   assert.equal(timeoutMs, 15_000);
   assert.equal(writes.length, 1);
   assert.deepEqual(JSON.parse(writes[0].toString('utf8')), body);
+  assert.throws(() => bitbucketRequest({
+    auth,
+    method: 'POST',
+    path: '/2.0/repositories/workspace/repo/pullrequests/7/comments',
+    body,
+    redirect: () => '/2.0/user',
+    request,
+  }), /redirect policy is invalid/u);
+});
+
+test('Bitbucket pull request diff follows one validated provider redirect', async () => {
+  const calls = [];
+  const location = 'https://api.bitbucket.org/2.0/repositories/workspace/repo/' +
+    'diff/workspace/repo:abc%0Ddef?from_pullrequest_id=7&topic=true';
+  const request = (options, callback) => {
+    calls.push(options);
+    const req = new EventEmitter();
+    req.setTimeout = () => {};
+    req.end = () => {
+      const response = new PassThrough();
+      response.statusCode = calls.length === 1 ? 302 : 200;
+      response.headers = calls.length === 1 ? { location } : {};
+      callback(response);
+      response.end(calls.length === 1 ? '' : 'diff body');
+    };
+    req.destroy = (error) => req.emit('error', error);
+    return req;
+  };
+  const api = (options) => bitbucketRequest({ ...options, request });
+
+  assert.equal(await getBitbucketPullRequestDiff({
+    repo: 'workspace/repo', number: 7, auth, api,
+  }), 'diff body');
+  assert.deepEqual(calls.map((call) => call.path), [
+    '/2.0/repositories/workspace/repo/pullrequests/7/diff',
+    '/2.0/repositories/workspace/repo/diff/workspace/repo:abc%0Ddef' +
+      '?from_pullrequest_id=7&topic=true',
+  ]);
+  assert.equal(calls.every((call) => call.method === 'GET'), true);
+  assert.equal(calls.every((call) => call.hostname === 'api.bitbucket.org'), true);
+  assert.equal(calls.every((call) => call.headers.accept === 'text/plain'), true);
+  assert.equal(calls[1].headers.authorization, calls[0].headers.authorization);
+});
+
+test('Bitbucket pull request diff rejects unsafe or repeated redirects', async (t) => {
+  const validPath = '/2.0/repositories/workspace/repo/' +
+    'diff/workspace/repo:abc%0Ddef?from_pullrequest_id=7&topic=true';
+  const unsafeLocations = [
+    undefined,
+    `https://attacker.example${validPath}`,
+    `http://api.bitbucket.org${validPath}`,
+    `https://user@example.com${validPath}`,
+    `https://api.bitbucket.org:444${validPath}`,
+    `https://api.bitbucket.org${validPath}#fragment`,
+    `https://api.bitbucket.org${validPath.replace('/workspace/repo/diff/', '/other/repo/diff/')}`,
+    `https://api.bitbucket.org${validPath.replace('from_pullrequest_id=7', 'from_pullrequest_id=8')}`,
+    `https://api.bitbucket.org${validPath}&extra=true`,
+    `https://api.bitbucket.org${validPath.replace('abc%0Ddef', 'abc%2Fdef')}`,
+    validPath,
+  ];
+  for (const [index, location] of unsafeLocations.entries()) await t.test(String(index), async () => {
+    let calls = 0;
+    const request = (_options, callback) => {
+      calls += 1;
+      const req = new EventEmitter();
+      req.setTimeout = () => {};
+      req.end = () => {
+        const response = new PassThrough();
+        response.statusCode = 302;
+        response.headers = location === undefined ? {} : { location };
+        callback(response);
+        response.end();
+      };
+      req.destroy = (error) => req.emit('error', error);
+      return req;
+    };
+    const api = (options) => bitbucketRequest({ ...options, request });
+    await assert.rejects(getBitbucketPullRequestDiff({
+      repo: 'workspace/repo', number: 7, auth, api,
+    }), /unsafe redirect|HTTP 302/u);
+    assert.equal(calls, 1);
+  });
+
+  let calls = 0;
+  const request = (_options, callback) => {
+    calls += 1;
+    const req = new EventEmitter();
+    req.setTimeout = () => {};
+    req.end = () => {
+      const response = new PassThrough();
+      response.statusCode = 302;
+      response.headers = {
+        location: `https://api.bitbucket.org${validPath}`,
+      };
+      callback(response);
+      response.end();
+    };
+    req.destroy = (error) => req.emit('error', error);
+    return req;
+  };
+  const api = (options) => bitbucketRequest({ ...options, request });
+  await assert.rejects(getBitbucketPullRequestDiff({
+    repo: 'workspace/repo', number: 7, auth, api,
+  }), /HTTP 302/u);
+  assert.equal(calls, 2);
 });
 
 test('Bitbucket POST timeout and request errors never replay the mutation', async (t) => {
