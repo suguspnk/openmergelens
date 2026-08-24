@@ -4,6 +4,9 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Added a manual, provider-qualified per-repository `reviewAttribution` setting.
+  The visible OpenMergeLens review footer remains enabled by default, while an
+  explicit `false` hides it without removing the private reconciliation marker.
 - Fixed Bitbucket Cloud pull-request diff fetching by following its documented
   one-hop redirect only when it remains on the expected API and repository path.
 - Fixed Bitbucket Cloud review discovery by explicitly requesting reviewer data

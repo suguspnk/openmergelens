@@ -246,8 +246,18 @@ After running the command for the package manager you used, copy
 | `reviewBatchSize` | Configured upper bound for concurrent PR reviews across all accounts (defaults to `5`). A built-in memory admission cap of three reviews also applies. |
 | `reviewFocusCount` | Number of independent review focus categories to run before the final synthesis pass (defaults to `4`, maximum `4`). The onboarding wizard asks for this; lower values skip later categories to trade coverage for runtime. |
 | `reviewTimeoutMs` | Maximum runtime for each reviewer process (defaults to `1800000`, 30 minutes; accepts `60000` through `3600000`). `openmergelens config` can update it in the Review behavior menu; `init` preserves an existing value. |
+| `reviewAttribution` | Optional per-repository map controlling the visible “OpenMergeLens generated this review” attribution. Attribution defaults to `true`; set a provider-qualified repository such as `"bitbucket.org/WORKSPACE/REPO": false` to hide it. This manual option is not shown in the interactive wizard. Hidden reconciliation markers remain present either way. |
 | `desktopNotifications` | Show one audible desktop notification after a poll produces review results or needs attention (defaults to `true`). Set to `false` to opt out. |
 | `stateFile` | Where last-reviewed commit SHAs are tracked (defaults to `./state.json`, resolved under `~/.openmergelens/`). |
+
+For example, this disables the visible attribution only for one Bitbucket
+repository; every unlisted repository remains enabled:
+
+```json
+"reviewAttribution": {
+  "bitbucket.org/mwell-systems/mwell-healthpal-cms": false
+}
+```
 
 `~/.openmergelens/config.json` is local, machine-specific config. It is never
 committed to a repo. It stores hostnames and usernames, never tokens. Each poll

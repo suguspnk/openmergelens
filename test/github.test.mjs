@@ -774,6 +774,7 @@ test('prepareReview shares posting validation and diff-anchor classification', (
       },
     ],
     diff: '+++ b/file.js\n@@ -0,0 +1 @@\n+line\n',
+    includeAttribution: false,
   });
 
   assert.equal(prepared.anchorable.length, 1);
@@ -781,6 +782,8 @@ test('prepareReview shares posting validation and diff-anchor classification', (
   assert.equal(prepared.payload.comments.length, 1);
   assert.match(prepared.reviewBody, /Additional findings \(could not anchor to a diff line\)/);
   assert.match(prepared.reviewBody, /missing\.js:99/);
+  assert.doesNotMatch(prepared.reviewBody, /OpenMergeLens generated this review/u);
+  assert.match(prepared.reviewBody, /openmergelens-review:/u);
 });
 
 test('diff anchor parsing fails closed before retaining too many anchors', () => {
@@ -1085,6 +1088,7 @@ test('postReview treats an ambiguously successful request as complete after reco
 
   await postReview({
     ...options,
+    includeAttribution: true,
     request,
     scheduleMutation: async (operation, options) => {
       scheduledOperations.push(options);
@@ -1120,6 +1124,7 @@ test('postReview retries without inline comments only for an unreconciled 422', 
 
   await postReview({
     ...reviewOptions(),
+    includeAttribution: false,
     request,
     scheduleMutation: async (operation, options) => {
       scheduledOperations.push(options);
@@ -1136,6 +1141,10 @@ test('postReview retries without inline comments only for an unreconciled 422', 
   assert.equal(payloads[0].comments.length, 1);
   assert.deepEqual(payloads[1].comments, []);
   assert.match(payloads[1].body, /All findings/);
+  for (const payload of payloads) {
+    assert.doesNotMatch(payload.body, /OpenMergeLens generated this review/u);
+    assert.match(payload.body, /openmergelens-review:/u);
+  }
 });
 
 test('postReview rejects unsafe finding fields at the posting boundary', async () => {

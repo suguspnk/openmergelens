@@ -11,6 +11,8 @@ import {
   normalizeBitbucketRepository,
   normalizeBitbucketWorkspace,
   parseAccountSelector,
+  reviewAttributionEnabled,
+  reviewAttributionKey,
   saveConfig,
   validateConfig,
 } from '../lib/config.mjs';
@@ -102,6 +104,7 @@ test('validates and normalizes a version 5 multi-account config', () => {
     githubAccounts: validConfig.githubAccounts,
     reviewerCommand: CODEX_REVIEWER_COMMAND,
     reviewerInputMode: 'stdin',
+    reviewAttribution: {},
     desktopNotifications: true,
   });
 });
@@ -658,6 +661,72 @@ test('desktop notifications default on and require a boolean opt-out', () => {
   assert.throws(
     () => validateConfig({ ...validConfig, desktopNotifications: 'false' }),
     /desktopNotifications must be true or false/,
+  );
+});
+
+test('review attribution defaults on and supports validated per-repository overrides', () => {
+  const config = validateConfig(validConfig);
+  const account = config.githubAccounts[0];
+  assert.equal(reviewAttributionKey(account, 'Company/API'), 'github.com/Company/API');
+  assert.equal(reviewAttributionEnabled(config, account, 'Company/API'), true);
+
+  const disabled = validateConfig({
+    ...validConfig,
+    reviewAttribution: { 'GITHUB.COM/company/api': false },
+  });
+  assert.deepEqual(disabled.reviewAttribution, { 'github.com/Company/API': false });
+  assert.equal(reviewAttributionEnabled(disabled, account, 'Company/API'), false);
+  assert.equal(reviewAttributionEnabled(disabled, account, 'Company/web'), true);
+  const bitbucketAccount = {
+    accountId: '{123e4567-e89b-42d3-a456-426614174000}',
+    credentialUsername: 'reviewer@example.com',
+    repositories: ['Workspace/Repo'],
+  };
+  const bitbucketConfig = validateConfig({
+    ...validConfig,
+    configVersion: 6,
+    githubAccounts: [],
+    bitbucketAccounts: [bitbucketAccount],
+    aiProcessingConsent: null,
+    reviewAttribution: { 'BITBUCKET.ORG/workspace/repo': false },
+  });
+  assert.deepEqual(bitbucketConfig.reviewAttribution, {
+    'bitbucket.org/Workspace/Repo': false,
+  });
+  assert.equal(
+    reviewAttributionEnabled(bitbucketConfig, bitbucketConfig.bitbucketAccounts[0], 'Workspace/Repo'),
+    false,
+  );
+  assert.throws(
+    () => validateConfig({
+      ...validConfig,
+      reviewAttribution: null,
+    }),
+    /reviewAttribution must be an object/u,
+  );
+  assert.throws(
+    () => validateConfig({
+      ...validConfig,
+      reviewAttribution: { 'github.com/Company/API': 'false' },
+    }),
+    /reviewAttribution.*must be true or false/u,
+  );
+  assert.throws(
+    () => validateConfig({
+      ...validConfig,
+      reviewAttribution: { 'github.com/other/repo': false },
+    }),
+    /unconfigured repository/u,
+  );
+  assert.throws(
+    () => validateConfig({
+      ...validConfig,
+      reviewAttribution: {
+        'github.com/Company/API': false,
+        'GITHUB.COM/company/api': true,
+      },
+    }),
+    /duplicate repository/u,
   );
 });
 

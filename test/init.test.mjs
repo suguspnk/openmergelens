@@ -73,6 +73,7 @@ test('init preserves a manually configured reviewer timeout when rebuilding conf
     reviewBatchSize: 2,
     reviewFocusCount: 4,
     reviewTimeoutMs: 15 * 60 * 1000,
+    reviewAttribution: { 'github.com/owner/repo': false },
     desktopNotifications: true,
     stateFile: './state.json',
   };
@@ -88,6 +89,7 @@ test('init preserves a manually configured reviewer timeout when rebuilding conf
   });
 
   assert.equal(rebuilt.reviewTimeoutMs, existingConfig.reviewTimeoutMs);
+  assert.deepEqual(rebuilt.reviewAttribution, existingConfig.reviewAttribution);
   assert.equal(rebuilt.desktopNotifications, false);
 });
 

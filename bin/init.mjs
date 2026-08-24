@@ -10,6 +10,7 @@ import {
 import {
   accountLabel,
   CONFIG_VERSION,
+  retainReviewAttribution,
   saveConfig,
   validateConfig,
   validateNormalizedConfig,
@@ -100,6 +101,15 @@ export function buildSetupConfig({
     // The timeout is intentionally manual-only; preserve an existing
     // override without adding another setup prompt.
     reviewTimeoutMs: existingConfig?.reviewTimeoutMs,
+    // Attribution overrides are intentionally manual-only too. Preserve
+    // existing per-repository choices without adding them to the setup wizard.
+    reviewAttribution: retainReviewAttribution(
+      existingConfig?.reviewAttribution,
+      [
+        ...(githubAccounts || existingConfig?.githubAccounts || []),
+        ...(bitbucketAccounts || existingConfig?.bitbucketAccounts || []),
+      ],
+    ),
     desktopNotifications,
     stateFile: existingConfig?.stateFile || './state.json',
   });

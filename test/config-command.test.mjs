@@ -122,6 +122,30 @@ test('config editor preserves normalized Bitbucket accounts through an unrelated
   assert.equal(writes.length, 1);
 });
 
+test('config editor prunes attribution overrides for repositories it removes', async () => {
+  const currentConfig = validateConfig({
+    ...createConfig(),
+    reviewAttribution: { 'github.com/OWNER/REPO': false },
+  });
+  const changed = await persistConfigUpdate({
+    configPath: '/tmp/openmergelens-config.json',
+    currentConfig,
+    nextConfig: {
+      ...currentConfig,
+      githubAccounts: [],
+      bitbucketAccounts: [{
+        accountId: '{123e4567-e89b-42d3-a456-426614174000}',
+        credentialUsername: 'reviewer@example.com',
+        repositories: ['workspace/repo'],
+      }],
+    },
+    save: async (_configPath, config) => config,
+  });
+
+  assert.equal(changed.changed, true);
+  assert.deepEqual(changed.config.reviewAttribution, {});
+});
+
 test('Bitbucket discovery failure prevents consent, review files, and config save', async () => {
   const currentConfig = createBitbucketConfig();
   const calls = { consent: 0, files: 0, saves: 0 };

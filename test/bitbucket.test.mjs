@@ -732,6 +732,7 @@ test('Bitbucket metadata is normalized to the poller PR contract', async () => {
 test('Bitbucket review preparation demotes invalid inline locations', () => {
   const prepared = prepareBitbucketReview({
     body: 'Summary', marker: '<!-- marker -->', auth,
+    includeAttribution: false,
     diff: '+++ b/src/a.js\n@@ -0,0 +1 @@\n+line\n',
     comments: [
       { path: 'src/a.js', line: 1, severity: 'major', comment: 'Valid' },
@@ -741,6 +742,8 @@ test('Bitbucket review preparation demotes invalid inline locations', () => {
   assert.equal(prepared.anchorable.length, 1);
   assert.equal(prepared.unanchorable.length, 1);
   assert.match(prepared.summary, /src\/a\.js:99/u);
+  assert.doesNotMatch(prepared.summary, /OpenMergeLens generated this review/u);
+  assert.match(prepared.summary, /<!-- marker -->/u);
 });
 
 test('Bitbucket summary safely bounds code spans and disables mentions in adversarial paths', () => {
@@ -786,6 +789,7 @@ test('Bitbucket attribution bounds identity and neutralizes Markdown, mentions, 
     body: 'Summary',
     marker: '<!-- marker -->',
     auth: { ...auth, displayName: maliciousDisplayName },
+    includeAttribution: true,
     diff: '',
     comments: [],
   });
@@ -815,6 +819,7 @@ test('Bitbucket posting writes inline comments before the completion marker', as
   };
   await postBitbucketReview({
     repo: 'workspace/repo', number: 7, body: 'Summary', marker, auth, api,
+    includeAttribution: false,
     diff: '+++ b/src/a.js\n@@ -0,0 +1 @@\n+line\n',
     comments: [{ path: 'src/a.js', line: 1, severity: 'major', comment: 'Finding' }],
     scheduleMutation: (operation) => operation(),
@@ -823,6 +828,7 @@ test('Bitbucket posting writes inline comments before the completion marker', as
   assert.deepEqual(calls[0].inline, { path: 'src/a.js', to: 1 });
   assert.doesNotMatch(calls[0].content.raw, /openmergelens-review:/u);
   assert.match(calls[1].content.raw, /openmergelens-review:/u);
+  assert.doesNotMatch(calls[1].content.raw, /OpenMergeLens generated this review/u);
   assert.equal(await bitbucketReviewAlreadyPosted({
     repo: 'workspace/repo', number: 7, marker, auth,
     api: async () => ({ values: [{ user: { uuid: account.accountId }, content: { raw: marker } }] }),

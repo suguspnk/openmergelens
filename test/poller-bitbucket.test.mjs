@@ -39,6 +39,7 @@ test('Bitbucket dry run reviews assigned PRs without mutation, state write, or r
     reviewBatchSize: 1,
     reviewFocusCount: 1,
     reviewTimeoutMs: 60_000,
+    reviewAttribution: { 'bitbucket.org/workspace/repo': false },
   };
   const result = await pollOnce({
     config,
@@ -77,7 +78,10 @@ test('Bitbucket dry run reviews assigned PRs without mutation, state write, or r
         assert.match(providerDiff, /\+line/u);
         return { summary: 'Summary', findings: [] };
       },
-      prepareBitbucketReview: () => ({ anchorable: [], unanchorable: [] }),
+      prepareBitbucketReview: ({ includeAttribution }) => {
+        assert.equal(includeAttribution, false);
+        return { anchorable: [], unanchorable: [] };
+      },
       postBitbucketReview: async () => { posts += 1; },
       reviewerSourceEnvironment: {
         PATH: '/usr/bin',
