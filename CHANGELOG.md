@@ -4,14 +4,16 @@ OpenMergeLens follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-08-25
+
 - Required an observed Bitbucket reviewer removal and a later fresh assignment
   before new commits can trigger another review, matching the existing
   request-driven review contract even though Bitbucket comments do not fulfill
   reviewer assignments.
 - Hardened Bitbucket pagination against later pages that drop the requested
   reviewer fields, rejected terminal-control and invisible-format characters in
-  credential usernames, and split the Windows Node 22 poller regression window
-  around its durable-write-heavy cases.
+  credential usernames, and split the Node 22 poller and state regression
+  windows around their durable-write-heavy cases.
 - Fixed Bitbucket Cloud reconciliation signatures appearing as visible HTML by
   emitting non-rendering Markdown reference definitions instead, while still
   recognizing reviews and partial inline posts made with the legacy markers.

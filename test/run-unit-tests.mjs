@@ -16,6 +16,7 @@ const partitionedFiles = new Set([
   'poller-performance.test.mjs',
   'poller-state-gc-capacity.test.mjs',
   'poller.test.mjs',
+  'state.test.mjs',
 ]);
 
 const runs = [
