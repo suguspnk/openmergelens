@@ -593,6 +593,33 @@ test('Bitbucket REST rejects and cleans up an aborted response after partial dat
   assert.equal(interrupted.requestWasDestroyed(), true);
 });
 
+test('Bitbucket REST rejects malformed HTTP metadata before accepting a body', async (t) => {
+  for (const [name, statusCode, headers] of [
+    ['missing status', undefined, {}],
+    ['invalid status', 99, {}],
+    ['missing headers', 200, undefined],
+  ]) await t.test(name, async () => {
+    const request = (_options, callback) => {
+      const req = new EventEmitter();
+      req.setTimeout = () => {};
+      req.end = () => {
+        const response = new PassThrough();
+        response.statusCode = statusCode;
+        response.headers = headers;
+        callback(response);
+        response.end('{}');
+      };
+      req.destroy = (error) => req.emit('error', error);
+      return req;
+    };
+    await assert.rejects(bitbucketRequest({
+      auth,
+      path: '/2.0/user',
+      request,
+    }), /malformed HTTP response/u);
+  });
+});
+
 test('Bitbucket discovery filters open repository PRs by stable reviewer UUID', async () => {
   const paths = [];
   const result = await searchBitbucketReviewRequestedPRs({
@@ -648,6 +675,42 @@ test('Bitbucket discovery returns a requested PR from a later collection page', 
   });
   assert.deepEqual(paths, [firstPath, secondPath]);
   assert.deepEqual(result, [{ repo: 'workspace/repo', number: 8 }]);
+});
+
+test('Bitbucket PR discovery rejects pagination that drops reviewer field guarantees', async () => {
+  let calls = 0;
+  await assert.rejects(searchBitbucketReviewRequestedPRs({
+    account,
+    repo: 'workspace/repo',
+    auth,
+    api: async () => {
+      calls += 1;
+      return {
+        values: [],
+        next: 'https://api.bitbucket.org/2.0/repositories/workspace/repo/' +
+          'pullrequests?state=OPEN&pagelen=50&page=2',
+      };
+    },
+  }), /unsafe pagination URL/u);
+  assert.equal(calls, 1);
+});
+
+test('Bitbucket pagination rejects credentials, fragments, controls, and oversized URLs', async (t) => {
+  const initial = '/2.0/repositories/workspace/repo/pullrequests?' +
+    'state=OPEN&pagelen=50&fields=%2Bvalues.reviewers';
+  for (const next of [
+    `https://user:password@api.bitbucket.org${initial}&page=2`,
+    `https://api.bitbucket.org${initial}&page=2#fragment`,
+    `https://api.bitbucket.org${initial}&page=2\nignored`,
+    `https://api.bitbucket.org${initial}&cursor=${'x'.repeat(4_096)}`,
+  ]) await t.test(String(next.length), async () => {
+    await assert.rejects(searchBitbucketReviewRequestedPRs({
+      account,
+      repo: 'workspace/repo',
+      auth,
+      api: async () => ({ values: [], next }),
+    }), /unsafe pagination URL/u);
+  });
 });
 
 test('Bitbucket PR discovery fails closed instead of truncating at the value limit', async () => {

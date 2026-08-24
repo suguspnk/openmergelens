@@ -325,6 +325,14 @@ The account must appear in each pull request's Bitbucket **Reviewers** list.
 OpenMergeLens posts individual inline comments and a completion summary; it does
 not call Bitbucket's approval endpoint. `--dry-run` performs reads and reviewer
 execution but does not post comments or update state.
+Because a Bitbucket comment does not fulfill or remove a reviewer assignment,
+OpenMergeLens will not treat a new commit alone as a renewed request. After a
+completed review, the reviewer must be removed, OpenMergeLens must observe one
+complete repository poll without that reviewer, and the reviewer must then be
+added again after the new commits. Re-adding the reviewer on the already-reviewed
+head consumes that request cycle; later commits still require another observed
+remove-and-add cycle. This provider-specific state is stored atomically with the
+reviewed commit and never authorizes a repository or account outside its key.
 Tracked Bitbucket entries may reconcile a completion comment after a failed
 state write, but they never trigger a new review or comment unless the stable
 reviewer UUID is present in the current discovery result. Before the first

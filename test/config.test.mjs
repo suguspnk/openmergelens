@@ -128,6 +128,19 @@ test('version 6 accepts Bitbucket Cloud accounts and uses the stable account UUI
   assert.equal(accountKey(config.bitbucketAccounts[0]), `bitbucket.org@${bitbucket.accountId}`);
   assert.equal(accountLabel(config.bitbucketAccounts[0]), 'reviewer@example.com@bitbucket.org');
   assert.equal(hasAiProcessingConsent(config), true);
+
+  for (const unsafe of [
+    'reviewer\u001b[31m@example.com',
+    'reviewer\u202e@example.com',
+    'reviewer\u200b@example.com',
+  ]) {
+    assert.throws(() => validateConfig({
+      ...validConfig,
+      configVersion: 6,
+      githubAccounts: [],
+      bitbucketAccounts: [{ ...bitbucket, credentialUsername: unsafe }],
+    }), /credentialUsername is invalid/u);
+  }
 });
 
 test('Bitbucket Cloud config survives normalized save and strict reload without derived fields', async (t) => {

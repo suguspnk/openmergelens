@@ -25,6 +25,184 @@ const account = {
   repositories: ['workspace/repo'],
 };
 
+function quietLogger() {
+  return {
+    child: () => ({ info() {}, warn() {}, error() {}, output() {} }),
+    info() {}, warn() {}, error() {}, output() {}, flush: async () => {},
+  };
+}
+
+test('Bitbucket new commits require an observed removal and fresh reviewer request', async () => {
+  let durableState = {
+    [prKey('workspace/repo', 7, account)]: {
+      lastReviewedSha: 'reviewed-head',
+      lastReviewedAt: '2026-08-20T00:00:00.000Z',
+      reviewMarkerVersion: 1,
+    },
+  };
+  let requested = true;
+  let headRefOid = 'new-head';
+  let reviewerCalls = 0;
+  let postCalls = 0;
+  let now = Date.parse('2026-08-21T00:00:00.000Z');
+  const config = {
+    configVersion: 6,
+    githubAccounts: [],
+    bitbucketAccounts: [account],
+    aiProcessingConsent: createAiProcessingConsent('reviewer', [account]),
+    reviewerCommand: 'reviewer', model: null, reviewBatchSize: 1,
+    reviewFocusCount: 1, reviewTimeoutMs: 60_000,
+  };
+  const dependencies = {
+    now: () => now,
+    createGitHubMutationQueue: () => ({ run: (operation) => operation() }),
+    createGitHubMutationCadence: () => ({
+      run: async (operation, { beforeStart } = {}) => {
+        await beforeStart?.();
+        return operation();
+      },
+    }),
+    resolveBitbucketAuth: async () => ({
+      ...account, username: account.credentialUsername, password: 'secret',
+    }),
+    searchBitbucketReviewRequestedPRs: async () => requested
+      ? [{ repo: 'workspace/repo', number: 7 }]
+      : [],
+    getBitbucketPullRequest: async () => ({
+      headRefOid, number: 7, title: 'PR', body: '', state: 'OPEN',
+      url: 'https://bitbucket.org/workspace/repo/pull-requests/7',
+    }),
+    getBitbucketPullRequestDiff: async () => '+++ b/a.js\n@@ -0,0 +1 @@\n+line\n',
+    bitbucketReviewAlreadyPosted: async () => false,
+    createBitbucketReviewMarker: () => '[openmergelens-review-fixture]: #',
+    ensureReviewPrompt: async () => '/virtual/prompt.md',
+    readPrompt: async () => '{{diff}}',
+    readLearnings: async () => '',
+    invokeMultiPassReview: async () => {
+      reviewerCalls += 1;
+      return { summary: 'Summary', findings: [] };
+    },
+    prepareBitbucketReview: () => ({ anchorable: [], unanchorable: [] }),
+    postBitbucketReview: async () => { postCalls += 1; },
+    loadState: async () => structuredClone(durableState),
+    saveState: async (_path, state) => { durableState = structuredClone(state); },
+  };
+  const poll = () => pollOnce({
+    config,
+    stateFile: '/unused/state.json',
+    defaultReviewPromptPath: '/unused/template.md',
+    logger: quietLogger(),
+    dependencies,
+  });
+
+  const stillAssigned = await poll();
+  assert.equal(stillAssigned.reviewed, 0);
+  assert.equal(reviewerCalls, 0);
+  assert.equal(postCalls, 0);
+
+  requested = false;
+  now += 60_000;
+  await poll();
+  const key = prKey('workspace/repo', 7, account);
+  assert.equal(durableState[key].bitbucketRequestRemovedAt, new Date(now).toISOString());
+
+  requested = true;
+  now += 60_000;
+  const freshlyRequested = await poll();
+  assert.equal(freshlyRequested.reviewed, 1);
+  assert.equal(reviewerCalls, 1);
+  assert.equal(postCalls, 1);
+  assert.equal(durableState[key].lastReviewedSha, 'new-head');
+  assert.equal(durableState[key].bitbucketRequestRemovedAt, undefined);
+
+  // Removing and re-adding on the already-reviewed head consumes that request
+  // cycle; a later commit alone must not inherit it.
+  requested = false;
+  now += 60_000;
+  await poll();
+  requested = true;
+  now += 60_000;
+  await poll();
+  assert.equal(durableState[key].bitbucketRequestRemovedAt, undefined);
+  headRefOid = 'later-head';
+  now += 60_000;
+  const laterCommitOnly = await poll();
+  assert.equal(laterCommitOnly.reviewed, 0);
+  assert.equal(reviewerCalls, 1);
+  assert.equal(postCalls, 1);
+});
+
+test('a durable Bitbucket posting plan remains resumable without a new request-cycle marker', async () => {
+  const key = prKey('workspace/repo', 7, account);
+  const loadedState = {
+    [key]: {
+      lastReviewedSha: 'older-head',
+      lastReviewedAt: '2026-08-20T00:00:00.000Z',
+      reviewMarkerVersion: 1,
+    },
+  };
+  recordBitbucketPostingPlan(loadedState, key, {
+    commitId: 'prepared-head',
+    body: 'Prepared summary',
+    comments: [],
+  });
+  let savedState;
+  let reviewerCalls = 0;
+  let postCalls = 0;
+  const config = {
+    configVersion: 6,
+    githubAccounts: [],
+    bitbucketAccounts: [account],
+    aiProcessingConsent: createAiProcessingConsent('reviewer', [account]),
+    reviewerCommand: 'reviewer', model: null, reviewBatchSize: 1,
+    reviewFocusCount: 1, reviewTimeoutMs: 60_000,
+  };
+
+  const result = await pollOnce({
+    config,
+    stateFile: '/unused/state.json',
+    defaultReviewPromptPath: '/unused/template.md',
+    logger: quietLogger(),
+    dependencies: {
+      createGitHubMutationQueue: () => ({ run: (operation) => operation() }),
+      createGitHubMutationCadence: () => ({
+        run: async (operation, { beforeStart } = {}) => {
+          await beforeStart?.();
+          return operation();
+        },
+      }),
+      resolveBitbucketAuth: async () => ({
+        ...account, username: account.credentialUsername, password: 'secret',
+      }),
+      searchBitbucketReviewRequestedPRs: async () => [{ repo: 'workspace/repo', number: 7 }],
+      getBitbucketPullRequest: async () => ({
+        headRefOid: 'prepared-head', number: 7, title: 'PR', body: '', state: 'OPEN',
+        url: 'https://bitbucket.org/workspace/repo/pull-requests/7',
+      }),
+      getBitbucketPullRequestDiff: async () => '+++ b/a.js\n@@ -0,0 +1 @@\n+line\n',
+      bitbucketReviewAlreadyPosted: async () => false,
+      createBitbucketReviewMarker: () => '[openmergelens-review-fixture]: #',
+      ensureReviewPrompt: async () => assert.fail('prepared plan must not reload the prompt'),
+      readPrompt: async () => assert.fail('prepared plan must not read the prompt'),
+      readLearnings: async () => assert.fail('prepared plan must not read learnings'),
+      invokeMultiPassReview: async () => { reviewerCalls += 1; return {}; },
+      postBitbucketReview: async ({ body }) => {
+        postCalls += 1;
+        assert.equal(body, 'Prepared summary');
+      },
+      loadState: async () => structuredClone(loadedState),
+      saveState: async (_path, state) => { savedState = structuredClone(state); },
+    },
+  });
+
+  assert.equal(result.failed, false);
+  assert.equal(result.reviewed, 1);
+  assert.equal(reviewerCalls, 0);
+  assert.equal(postCalls, 1);
+  assert.equal(savedState[key].lastReviewedSha, 'prepared-head');
+  assert.equal(bitbucketPostingPlanFor(savedState, key, 'prepared-head'), null);
+});
+
 test('Bitbucket dry run reviews assigned PRs without mutation, state write, or reviewer credentials', async () => {
   let posts = 0;
   let stateWrites = 0;

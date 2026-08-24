@@ -10,10 +10,15 @@ const alphabeticPartitions = [
 
 // The poller suite's A-F window contains several state-capacity and
 // reconciliation scenarios that exceed the hosted Windows 30-second test
-// timeout. Keep the default timeout unchanged and split only that file's
-// window so each title still belongs to exactly one deterministic partition.
+// timeout. In particular, the safety-cap and already-posted tests each perform
+// many durable Windows writes. Keep the default timeout unchanged and split
+// only that file's window so each title still belongs to one deterministic
+// partition.
 const pollerTestPartitions = [
-  '^[Aa]',
+  '^account',
+  '^a (?:changed|compacted|diff|dry|failed|foreign|head)',
+  '^a (?:PR|posted|rate-limited|requested|review|revoked|search)',
+  '^(?:already|an )',
   '^[Bb]',
   '^[Cc]',
   '^[D-Fd-f]',

@@ -20,6 +20,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   candidateCursorFor,
+  clearBitbucketReviewRequestRemoval,
   expireReviewState,
   flushStateDirectoryHandle,
   loadState as loadStateImplementation,
@@ -30,6 +31,7 @@ import {
   normalizeState,
   prKey,
   recordCandidateCursor,
+  reconcileBitbucketReviewRequests,
   recordReviewStateGcAfterKey,
   recordReviewStateGcPosition,
   REVIEW_STATE_COMMIT_INDETERMINATE,
@@ -55,6 +57,56 @@ import {
 const saveStateModuleUrl = new URL('../lib/state.mjs', import.meta.url).href;
 
 const reviewer = { hostname: 'github.com', username: 'OctoCat' };
+const bitbucketReviewer = {
+  hostname: 'bitbucket.org',
+  accountId: '{123e4567-e89b-42d3-a456-426614174000}',
+  credentialUsername: 'reviewer@example.com',
+};
+
+test('Bitbucket review request removal is durable, scoped, and explicitly consumed', () => {
+  const reviewedAt = '2026-08-20T00:00:00.000Z';
+  const removedAt = '2026-08-21T00:00:00.000Z';
+  const key = prKey('workspace/repo', 7, bitbucketReviewer);
+  const requestedKey = prKey('workspace/repo', 8, bitbucketReviewer);
+  const otherRepoKey = prKey('workspace/other', 9, bitbucketReviewer);
+  const state = {
+    [key]: { lastReviewedSha: 'sha-7', lastReviewedAt: reviewedAt, reviewMarkerVersion: 1 },
+    [requestedKey]: {
+      lastReviewedSha: 'sha-8', lastReviewedAt: reviewedAt, reviewMarkerVersion: 1,
+    },
+    [otherRepoKey]: {
+      lastReviewedSha: 'sha-9', lastReviewedAt: reviewedAt, reviewMarkerVersion: 1,
+    },
+  };
+
+  assert.deepEqual(reconcileBitbucketReviewRequests(state, {
+    account: bitbucketReviewer,
+    repo: 'workspace/repo',
+    requestedNumbers: new Set([8]),
+    observedAt: removedAt,
+  }), { changed: true, marked: 1 });
+  assert.equal(state[key].bitbucketRequestRemovedAt, removedAt);
+  assert.equal(state[requestedKey].bitbucketRequestRemovedAt, undefined);
+  assert.equal(state[otherRepoKey].bitbucketRequestRemovedAt, undefined);
+  assert.equal(clearBitbucketReviewRequestRemoval(state, key), true);
+  assert.equal(state[key].bitbucketRequestRemovedAt, undefined);
+  assert.equal(clearBitbucketReviewRequestRemoval(state, key), false);
+
+  assert.throws(() => normalizeState({
+    [prKey('owner/repo', 7, reviewer)]: {
+      lastReviewedSha: 'sha',
+      lastReviewedAt: reviewedAt,
+      bitbucketRequestRemovedAt: removedAt,
+    },
+  }, { nowMs: Date.parse('2026-08-22T00:00:00.000Z') }), /canonical key.*timestamp/u);
+  assert.throws(() => normalizeState({
+    [key]: {
+      lastReviewedSha: 'sha',
+      lastReviewedAt: reviewedAt,
+      bitbucketRequestRemovedAt: '2026-08-23T00:00:00.000Z',
+    },
+  }, { nowMs: Date.parse('2026-08-21T00:00:00.000Z') }), /canonical key.*timestamp/u);
+});
 
 // Node 22 on the hosted Windows runner exposes a valid file index but reports
 // a zero volume field for pathname Stats. Production path identity remains

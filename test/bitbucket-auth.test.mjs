@@ -75,10 +75,14 @@ test('Bitbucket account discovery derives the stable UUID without persisting cre
 });
 
 test('Bitbucket username and identity validation fail before unsafe credential use', async () => {
-  assert.throws(
-    () => normalizeBitbucketCredentialUsername('reviewer\npassword=injected'),
-    /invalid/u,
-  );
+  for (const unsafe of [
+    'reviewer\npassword=injected',
+    'reviewer\u001b[31m@example.com',
+    'reviewer\u202e@example.com',
+    'reviewer\u200b@example.com',
+  ]) {
+    assert.throws(() => normalizeBitbucketCredentialUsername(unsafe), /invalid/u);
+  }
   let credentialCalls = 0;
   await assert.rejects(
     discoverBitbucketAccount('reviewer\npassword=injected', {
